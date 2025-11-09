@@ -1,0 +1,20 @@
+# Jupyter
+**/*.ipynb_checkpoints/
+**/__pycache__/
+*.pyc
+
+# Environment
+.env
+*.env
+
+# Project directories
+data/
+bin/
+results/
+
+# Development artifacts
+src/__*
+
+# OS files
+.DS_Store
+Thumbs.db
