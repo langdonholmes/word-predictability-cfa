@@ -4,11 +4,13 @@ from itertools import tee
 
 from dataclasses import dataclass, field
 from typing import Optional
+from spacy.tokens import Doc
+import numpy.typing as npt
 
 crossloss = torch.nn.CrossEntropyLoss(reduction="none")
 
 
-def pairwise(arr, add_extra=True):
+def pairwise(arr, add_extra=True) -> zip:
     """
     [0, 1, 3, 4] --> [(0,1), (1,3), (3,4)]
     Add an extra value to end of iterable, so
@@ -33,8 +35,8 @@ class TokenPredictability:
     # Per-subword metrics
     subword_losses: list[float]  # AKA surprisals
     subword_entropy: list[float]  # Entropy of predicted distribution
-    hidden_state_pred: list[np.Array] = field(default_factory=list)
-    hidden_state_obs: list[np.Array] = field(default_factory=list)
+    hidden_state_pred: list[npt.NDArray] = field(default_factory=list)
+    hidden_state_obs: list[npt.NDArray] = field(default_factory=list)
 
     # Computed fields (derived in __post_init__)
     subword_probs: list[float] = field(init=False)
@@ -76,7 +78,9 @@ class TokenPredictability:
         }
 
 
-def get_centered_window(seq_len, center_idx, window_size):
+def get_centered_window(
+    seq_len: int, center_idx: int, window_size: int
+) -> tuple[int, int]:
     """
     Get a window centered on center_idx.
     If center_idx is near start/end, window extends further in the other direction.
@@ -193,7 +197,9 @@ class Predictor:
             if self.mask_id is None:
                 raise ValueError("Tokenizer must have mask_token for masked model")
 
-    def __call__(self, doc, window_size=None) -> DocPredictability:
+    def __call__(
+        self, doc: Doc, window_size: Optional[int] = None
+    ) -> DocPredictability:
         """
         Main entry point.
 
@@ -218,9 +224,11 @@ class Predictor:
 
         return res
 
-    def get_token_alignment(self, doc):
+    def get_token_alignment(
+        self, doc: Doc
+    ) -> tuple[dict[int, tuple[int, int]], npt.NDArray]:
         """
-        Align spaCy tokens with transformer subword tokens.
+        Align spaCy tokens with transformer subword tokens using span overlap.
         Returns mapping and token IDs.
         """
         # Tokenize the full document
@@ -233,12 +241,28 @@ class Predictor:
         trf_tok_ids = encoding.input_ids[0]
         offset_mapping = encoding["offset_mapping"][0]
 
-        # Get index of the first character of each token
-        spacy_starts = np.array([t.idx for t in doc])
-        trf_starts = np.array([st for st, _ in offset_mapping])
+        # Adjust offsets
+        # GPT/Llama tokenizers start tokens on the whitespace before the word
+        # So we need to adjust the start positions accordingly
+        adjusted_starts = []
 
-        # Find alignment points between tokenizers
-        common, common2spacy, common2trf = np.intersect1d(
+        for start, end in offset_mapping:
+            token_text = doc.text[start:end]
+            # Skip whitespace-only tokens
+            # Find first non-whitespace character in token
+            stripped_start = start + len(token_text) - len(token_text.lstrip())
+            adjusted_starts.append(stripped_start)
+
+        trf_starts = np.array(adjusted_starts)
+
+        # Get index of the first character of each spaCy token
+        spacy_starts = np.array([t.idx for t in doc])
+
+        # Find the matching character indices (idx) --> 'common'
+        # This is where both tokenizers align (both start new token at idx)
+        # Get the index (i) of common in the spacy list --> 'common2spacy'
+        # Get the index (i) of common in the trf token list --> 'common2trf'
+        _, common2spacy, common2trf = np.intersect1d(
             spacy_starts, trf_starts, return_indices=True
         )
 
@@ -249,7 +273,13 @@ class Predictor:
 
         return token_map, trf_tok_ids
 
-    def _process_masked(self, doc, token_map, trf_tok_ids, window_size):
+    def _process_masked(
+        self,
+        doc: Doc,
+        token_map: dict[int, tuple[int, int]],
+        trf_tok_ids: npt.NDArray,
+        window_size: int,
+    ) -> DocPredictability:
         """
         Process with masked language model.
         Creates one windowed, masked sequence per token and batches them.
@@ -278,7 +308,7 @@ class Predictor:
             # Mask the token
             window_ids[tok_indices] = self.mask_id
 
-            sequences_to_process.append(window_ids.tolist())
+            sequences_to_process.append(window_ids)
             spacy_indices.append(spacy_idx)
             # Store where masks will be after adding special tokens (+1 for [CLS])
             mask_positions_list.append(tok_indices + 1)
@@ -295,14 +325,10 @@ class Predictor:
             batch_tok_inds = tok_indices_list[i : i + self.batch_size]
 
             # Prepare inputs
-            inputs = self.tokenizer.pad(
-                [
-                    self.tokenizer.prepare_for_model(
-                        seq,
-                        add_special_tokens=True,
-                    )
-                    for seq in batch_seqs
-                ],
+            inputs = self.tokenizer(
+                self.tokenizer.batch_decode(batch_seqs),
+                padding=True,
+                truncation=True,
                 return_tensors="pt",
             ).to(self.device)
 
@@ -349,7 +375,13 @@ class Predictor:
 
         return doc_predictability
 
-    def _process_causal(self, doc, token_map, trf_tok_ids, window_size):
+    def _process_causal(
+        self,
+        doc: Doc,
+        token_map: dict[int, tuple[int, int]],
+        trf_tok_ids: npt.NDArray,
+        window_size: int,
+    ) -> DocPredictability:
         """
         Process with causal language model.
 
@@ -362,70 +394,67 @@ class Predictor:
         seq_len = len(trf_tok_ids)
 
         # PHASE 1: Process first window_size tokens in one pass
-        if seq_len > 0:
-            first_window_end = min(window_size, seq_len)
-            first_window_ids = trf_tok_ids[:first_window_end]
+        first_window_end = min(window_size, seq_len)
+        first_window_ids = trf_tok_ids[:first_window_end]
 
-            # Prepare input
-            inputs = self.tokenizer.prepare_for_model(
-                first_window_ids.tolist(),
-                add_special_tokens=True,
-                return_tensors="pt",
-            ).to(self.device)
+        # Prepare input
+        # Easiest to just convert to text and re-tokenize
+        # HF is inconsistent about adding BOS tokens. Let's manually do that.
+        input_str = self.tokenizer.bos_token + self.tokenizer.decode(first_window_ids)
+        inputs = self.tokenizer(
+            input_str,
+            truncation=True,
+            add_special_tokens=False,  # manually handle this
+            return_tensors="pt",
+        ).to(self.device)
+        input_ids = inputs["input_ids"]  # Shape: [1, seq_len]
 
-            input_ids = inputs["input_ids"]
+        # Get model outputs
+        with torch.no_grad():
+            outputs = self.model(**inputs)
+            logits = outputs.logits[0]  # [seq_len, vocab_size]
 
-            # Get model outputs
-            with torch.no_grad():
-                outputs = self.model(**inputs)
-                logits = outputs.logits[0]  # [seq_len, vocab_size]
+        # Extract predictions for all tokens in this window
+        for spacy_idx, (subword_start, subword_end) in token_map.items():
+            # Only process tokens in the first window
+            if subword_start >= first_window_end:
+                break
 
-            # Extract predictions for all tokens in this window
-            for spacy_idx, (subword_start, subword_end) in token_map.items():
-                # Only process tokens in the first window
-                if subword_start >= first_window_end:
-                    continue
+            losses = []
+            entropies = []
 
-                losses = []
-                entropies = []
+            # Position in input_ids (+1 for BOS token)
+            pos = subword_start + 1
 
-                for sub_idx in range(subword_start, subword_end):
-                    # Position in input_ids (+1 for BOS token)
-                    pos = sub_idx + 1
+            # Predict from previous position
+            # e.g., logit at BOS token predicts first real token in sequence
+            pred_logits = logits[pos - 1]
+            actual_id = input_ids[0, pos].item()
 
-                    if pos <= 0 or pos >= len(input_ids[0]):
-                        continue
+            # Calculate loss
+            target = torch.tensor([actual_id]).to(self.device)
+            loss = crossloss(pred_logits.unsqueeze(0), target).item()
+            losses.append(loss)
 
-                    # Predict from previous position
-                    pred_logits = logits[pos - 1]
-                    actual_id = input_ids[0, pos].item()
+            # Calculate entropy
+            probs_dist = torch.softmax(pred_logits, dim=-1)
+            entropy = -torch.sum(probs_dist * torch.log(probs_dist + 1e-10)).item()
+            entropies.append(entropy)
 
-                    # Calculate loss
-                    target = torch.tensor([actual_id]).to(self.device)
-                    loss = crossloss(pred_logits.unsqueeze(0), target).item()
-                    losses.append(loss)
-
-                    # Calculate entropy
-                    probs_dist = torch.softmax(pred_logits, dim=-1)
-                    entropy = -torch.sum(
-                        probs_dist * torch.log(probs_dist + 1e-10)
-                    ).item()
-                    entropies.append(entropy)
-
-                # Store results
-                token_pred = TokenPredictability(
-                    spacy_idx=spacy_idx,
-                    text=doc[spacy_idx].text,
-                    subword_losses=losses,
-                    subword_entropy=entropies,
-                )
-                doc_predictability.add_token(token_pred)
+            # Store results
+            token_pred = TokenPredictability(
+                spacy_idx=spacy_idx,
+                text=doc[spacy_idx].text,
+                subword_losses=losses,
+                subword_entropy=entropies,
+            )
+            doc_predictability.add_token(token_pred)
 
         # PHASE 2: Process remaining tokens with sliding windows (batched)
         remaining_tokens = [
             (spacy_idx, sub_start, sub_end)
             for spacy_idx, (sub_start, sub_end) in token_map.items()
-            if sub_start >= window_size
+            if sub_start >= first_window_end
         ]
 
         if not remaining_tokens:
@@ -434,7 +463,6 @@ class Predictor:
         # Create windowed sequences for remaining tokens
         sequences_to_process = []
         spacy_indices = []
-        position_info = []
 
         for spacy_idx, subword_start, subword_end in remaining_tokens:
             # For causal model, window is all left context up to window_size
@@ -442,32 +470,24 @@ class Predictor:
             win_end = subword_end
 
             window_ids = trf_tok_ids[win_start:win_end]
-            sequences_to_process.append(window_ids.tolist())
+            sequences_to_process.append(window_ids)
             spacy_indices.append(spacy_idx)
-
-            # Calculate where our target tokens are in this window
-            target_start = subword_start - win_start + 1  # +1 for BOS
-            target_end = subword_end - win_start + 1
-            position_info.append((target_start, target_end, subword_start, subword_end))
 
         # Process in batches
         for i in range(0, len(sequences_to_process), self.batch_size):
             batch_seqs = sequences_to_process[i : i + self.batch_size]
             batch_spacy = spacy_indices[i : i + self.batch_size]
-            batch_positions = position_info[i : i + self.batch_size]
 
             # Prepare inputs
-            inputs = self.tokenizer.pad(
-                [
-                    self.tokenizer.prepare_for_model(
-                        seq,
-                        add_special_tokens=True,
-                    )
-                    for seq in batch_seqs
-                ],
+            input_strs = [
+                self.tokenizer.bos_token + self.tokenizer.decode(seq)
+                for seq in batch_seqs
+            ]
+            inputs = self.tokenizer(
+                input_strs,
+                add_special_tokens=False,  # manually handle this
                 return_tensors="pt",
             ).to(self.device)
-
             input_ids = inputs["input_ids"]
 
             # Get predictions
@@ -476,33 +496,24 @@ class Predictor:
                 logits = outputs.logits
 
             # Extract results for each token in batch
-            for j, (
-                spacy_idx,
-                (target_start, target_end, sub_start, sub_end),
-            ) in enumerate(zip(batch_spacy, batch_positions)):
-                actual_ids = trf_tok_ids[sub_start:sub_end]
+            for j, spacy_idx in enumerate(batch_spacy):
+                actual_id = trf_tok_ids[token_map[spacy_idx][0]]
 
                 losses = []
                 entropies = []
 
-                for pos, actual_id in zip(range(target_start, target_end), actual_ids):
-                    if pos <= 0 or pos >= logits.shape[1]:
-                        continue
+                # Predict from previous position
+                pred_logits = logits[j, -1]
+                probs_dist = torch.softmax(pred_logits, dim=-1)
 
-                    # Predict from previous position
-                    pred_logits = logits[j, pos - 1]
-                    probs_dist = torch.softmax(pred_logits, dim=-1)
+                # Calculate loss
+                target = torch.tensor([actual_id]).to(self.device)
+                loss = crossloss(pred_logits.unsqueeze(0), target).item()
+                losses.append(loss)
 
-                    # Calculate loss
-                    target = torch.tensor([actual_id]).to(self.device)
-                    loss = crossloss(pred_logits.unsqueeze(0), target).item()
-                    losses.append(loss)
-
-                    # Calculate entropy
-                    entropy = -torch.sum(
-                        probs_dist * torch.log(probs_dist + 1e-10)
-                    ).item()
-                    entropies.append(entropy)
+                # Calculate entropy
+                entropy = -torch.sum(probs_dist * torch.log(probs_dist + 1e-10)).item()
+                entropies.append(entropy)
 
                 # Store results
                 token_pred = TokenPredictability(
@@ -514,3 +525,63 @@ class Predictor:
                 doc_predictability.add_token(token_pred)
 
         return doc_predictability
+
+if __name__ == "__main__":
+    import spacy
+    from transformers import AutoTokenizer, AutoModelForMaskedLM, AutoModelForCausalLM
+    
+    # Load spaCy for tokenization
+    nlp = spacy.load("en_core_web_sm")
+    
+    # Sample text
+    text = "The quick brown fox jumps over the lazy dog."
+    doc = nlp(text)
+    
+    print("=" * 60)
+    print("Testing Masked LM (BERT)")
+    print("=" * 60)
+    
+    # Test with masked LM
+    bert_tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
+    bert_model = AutoModelForMaskedLM.from_pretrained("bert-base-uncased")
+    
+    masked_predictor = Predictor(
+        bert_tokenizer, 
+        bert_model, 
+        model_type="masked",
+        batch_size=8,
+        device="cpu"
+    )
+    
+    masked_results = masked_predictor(doc, window_size=50)
+    
+    print(f"Mean surprisal: {masked_results.mean_surprisal:.4f}")
+    print(f"Mean entropy: {masked_results.mean_entropy:.4f}")
+    print("\nPer-token results:")
+    for token in masked_results:
+        print(f"  {token.text:12s} - prob: {token.mean_prob:.4f}, loss: {token.mean_loss:.4f}")
+    
+    print("\n" + "=" * 60)
+    print("Testing Causal LM (GPT-2)")
+    print("=" * 60)
+    
+    # Test with causal LM
+    gpt_tokenizer = AutoTokenizer.from_pretrained("gpt2")
+    gpt_model = AutoModelForCausalLM.from_pretrained("gpt2")
+    
+    causal_predictor = Predictor(
+        gpt_tokenizer,
+        gpt_model,
+        model_type="causal",
+        batch_size=8,
+        device="cpu"
+    )
+    
+    causal_results = causal_predictor(doc, window_size=4)
+    
+    print(f"Mean surprisal: {causal_results.mean_surprisal:.4f}")
+    print(f"Mean entropy: {causal_results.mean_entropy:.4f}")
+    print("\nPer-token results:")
+    for token in causal_results:
+        print(f"  {token.text:12s} - prob: {token.mean_prob:.4f}, loss: {token.mean_loss:.4f}")
+        print(f"  {token.text:12s} - prob: {token.mean_prob:.4f}, loss: {token.mean_loss:.4f}")
