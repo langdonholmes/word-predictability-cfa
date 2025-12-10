@@ -1,11 +1,11 @@
-import torch
-import numpy as np
-from itertools import tee
-
 from dataclasses import dataclass, field
+from itertools import tee
 from typing import Optional
-from spacy.tokens import Doc
+
+import numpy as np
 import numpy.typing as npt
+import torch
+from spacy.tokens import Doc
 
 crossloss = torch.nn.CrossEntropyLoss(reduction="none")
 
@@ -87,11 +87,18 @@ def get_centered_window(
 
     Returns (start, end) indices for the window.
     """
+    # Ensure window_size is at least 1
+    window_size = max(1, window_size)
+
     half_window = window_size // 2
 
     # Ideal centered window
     start = center_idx - half_window
     end = center_idx + half_window
+
+    # Ensure window has at least 1 element (handles odd window sizes and edge case)
+    if end <= start:
+        end = start + 1
 
     # Adjust if we're near the boundaries
     if start < 0:
@@ -102,6 +109,11 @@ def get_centered_window(
         # Near the end - extend to the left
         start = max(0, seq_len - window_size)
         end = seq_len
+
+    # Final safety check: ensure we have at least 1 element if seq_len > 0
+    if end <= start and seq_len > 0:
+        start = max(0, center_idx)
+        end = min(seq_len, center_idx + 1)
 
     return start, end
 
@@ -185,6 +197,7 @@ class Predictor:
         self.model = model
         self.batch_size = batch_size
         self.device = device
+        self.model.to(device)
         self.model.eval()
 
         self.model_type = model_type.lower()
@@ -284,6 +297,14 @@ class Predictor:
         Process with masked language model.
         Creates one windowed, masked sequence per token and batches them.
         """
+        doc_predictability = DocPredictability(
+            model_type=self.model_type, window_size=window_size
+        )
+
+        # Handle empty token map
+        if not token_map:
+            return doc_predictability
+
         seq_len = len(trf_tok_ids)
         sequences_to_process = []
         spacy_indices = []
@@ -296,6 +317,7 @@ class Predictor:
             win_start, win_end = get_centered_window(
                 seq_len, subword_start, window_size
             )
+            window_len = win_end - win_start
 
             # Create masked version of this window
             window_ids = trf_tok_ids[win_start:win_end].copy()
@@ -303,6 +325,15 @@ class Predictor:
             # Adjust token positions relative to window
             tok_start_in_window = subword_start - win_start
             tok_end_in_window = subword_end - win_start
+
+            # Clip to window bounds (for tokens that span more subwords than window size)
+            tok_start_in_window = max(0, tok_start_in_window)
+            tok_end_in_window = min(window_len, tok_end_in_window)
+
+            # Skip if no subwords fall within the window
+            if tok_end_in_window <= tok_start_in_window:
+                continue
+
             tok_indices = np.arange(tok_start_in_window, tok_end_in_window)
 
             # Mask the token
@@ -312,29 +343,46 @@ class Predictor:
             spacy_indices.append(spacy_idx)
             # Store where masks will be after adding special tokens (+1 for [CLS])
             mask_positions_list.append(tok_indices + 1)
-            tok_indices_list.append((subword_start, subword_end))
+            # Store the actual subword range that's being predicted (clipped to window)
+            actual_start = win_start + tok_start_in_window
+            actual_end = win_start + tok_end_in_window
+            tok_indices_list.append((actual_start, actual_end))
 
         # Process in batches
-        doc_predictability = DocPredictability(
-            model_type=self.model_type, window_size=window_size
-        )
         for i in range(0, len(sequences_to_process), self.batch_size):
             batch_seqs = sequences_to_process[i : i + self.batch_size]
             batch_spacy = spacy_indices[i : i + self.batch_size]
             batch_mask_pos = mask_positions_list[i : i + self.batch_size]
             batch_tok_inds = tok_indices_list[i : i + self.batch_size]
 
-            # Prepare inputs
-            inputs = self.tokenizer(
-                self.tokenizer.batch_decode(batch_seqs),
-                padding=True,
-                truncation=True,
-                return_tensors="pt",
-            ).to(self.device)
+            # Build input tensors directly
+            # Add CLS and SEP tokens to each sequence
+            cls_id = self.tokenizer.cls_token_id
+            sep_id = self.tokenizer.sep_token_id
+
+            # Build sequences with special tokens: [CLS] + tokens + [SEP]
+            full_seqs = []
+            for seq in batch_seqs:
+                full_seq = [cls_id] + seq.tolist() + [sep_id]
+                full_seqs.append(full_seq)
+
+            # Pad to max length in batch
+            max_len = max(len(s) for s in full_seqs)
+            pad_id = self.tokenizer.pad_token_id or 0
+
+            padded_seqs = []
+            attention_masks = []
+            for seq in full_seqs:
+                padding_length = max_len - len(seq)
+                padded_seqs.append(seq + [pad_id] * padding_length)
+                attention_masks.append([1] * len(seq) + [0] * padding_length)
+
+            input_ids = torch.tensor(padded_seqs, device=self.device)
+            attention_mask = torch.tensor(attention_masks, device=self.device)
 
             # Get predictions
             with torch.no_grad():
-                outputs = self.model(**inputs)
+                outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
                 logits = outputs.logits
 
             # Extract results for each token in batch
@@ -344,16 +392,24 @@ class Predictor:
                 # Get actual token IDs
                 actual_ids = trf_tok_ids[sub_start:sub_end]
 
+                # Skip if no actual IDs
+                if len(actual_ids) == 0:
+                    continue
+
                 # Calculate metrics
                 losses = []
                 entropies = []
 
                 for pos, actual_id in zip(mask_pos, actual_ids):
+                    # Validate position is within bounds
+                    if pos >= logits.shape[1]:
+                        continue
+
                     pred_logits = logits[j, pos]
                     probs_dist = torch.softmax(pred_logits, dim=-1)
 
                     # Calculate cross-entropy loss
-                    target = torch.tensor([actual_id]).to(self.device)
+                    target = torch.tensor([int(actual_id)], device=self.device)
                     loss = crossloss(pred_logits.unsqueeze(0), target).item()
                     losses.append(loss)
 
@@ -364,14 +420,15 @@ class Predictor:
                     ).item()
                     entropies.append(entropy)
 
-                # Store results
-                token_pred = TokenPredictability(
-                    spacy_idx=spacy_idx,
-                    text=doc[spacy_idx].text,
-                    subword_losses=losses,
-                    subword_entropy=entropies,
-                )
-                doc_predictability.add_token(token_pred)
+                # Store results only if we have valid losses
+                if losses:
+                    token_pred = TokenPredictability(
+                        spacy_idx=spacy_idx,
+                        text=doc[spacy_idx].text,
+                        subword_losses=losses,
+                        subword_entropy=entropies,
+                    )
+                    doc_predictability.add_token(token_pred)
 
         return doc_predictability
 
@@ -391,6 +448,11 @@ class Predictor:
         doc_predictability = DocPredictability(
             model_type=self.model_type, window_size=window_size
         )
+
+        # Handle empty token map
+        if not token_map:
+            return doc_predictability
+
         seq_len = len(trf_tok_ids)
 
         # PHASE 1: Process first window_size tokens in one pass
@@ -432,7 +494,7 @@ class Predictor:
             actual_id = input_ids[0, pos].item()
 
             # Calculate loss
-            target = torch.tensor([actual_id]).to(self.device)
+            target = torch.tensor([actual_id], device=self.device)
             loss = crossloss(pred_logits.unsqueeze(0), target).item()
             losses.append(loss)
 
@@ -507,7 +569,7 @@ class Predictor:
                 probs_dist = torch.softmax(pred_logits, dim=-1)
 
                 # Calculate loss
-                target = torch.tensor([actual_id]).to(self.device)
+                target = torch.tensor([int(actual_id)], device=self.device)
                 loss = crossloss(pred_logits.unsqueeze(0), target).item()
                 losses.append(loss)
 
@@ -526,62 +588,58 @@ class Predictor:
 
         return doc_predictability
 
+
 if __name__ == "__main__":
     import spacy
-    from transformers import AutoTokenizer, AutoModelForMaskedLM, AutoModelForCausalLM
-    
+    from transformers import AutoModelForCausalLM, AutoModelForMaskedLM, AutoTokenizer
+
     # Load spaCy for tokenization
-    nlp = spacy.load("en_core_web_sm")
-    
+    nlp = spacy.load("en_core_web_lg")
+
     # Sample text
     text = "The quick brown fox jumps over the lazy dog."
     doc = nlp(text)
-    
+
     print("=" * 60)
     print("Testing Masked LM (BERT)")
     print("=" * 60)
-    
+
     # Test with masked LM
     bert_tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
     bert_model = AutoModelForMaskedLM.from_pretrained("bert-base-uncased")
-    
+
     masked_predictor = Predictor(
-        bert_tokenizer, 
-        bert_model, 
-        model_type="masked",
-        batch_size=8,
-        device="cpu"
+        bert_tokenizer, bert_model, model_type="masked", batch_size=8, device="cpu"
     )
-    
+
     masked_results = masked_predictor(doc, window_size=50)
-    
+
     print(f"Mean surprisal: {masked_results.mean_surprisal:.4f}")
     print(f"Mean entropy: {masked_results.mean_entropy:.4f}")
     print("\nPer-token results:")
     for token in masked_results:
-        print(f"  {token.text:12s} - prob: {token.mean_prob:.4f}, loss: {token.mean_loss:.4f}")
-    
+        print(
+            f"  {token.text:12s} - prob: {token.mean_prob:.4f}, loss: {token.mean_loss:.4f}"
+        )
+
     print("\n" + "=" * 60)
     print("Testing Causal LM (GPT-2)")
     print("=" * 60)
-    
+
     # Test with causal LM
     gpt_tokenizer = AutoTokenizer.from_pretrained("gpt2")
     gpt_model = AutoModelForCausalLM.from_pretrained("gpt2")
-    
+
     causal_predictor = Predictor(
-        gpt_tokenizer,
-        gpt_model,
-        model_type="causal",
-        batch_size=8,
-        device="cpu"
+        gpt_tokenizer, gpt_model, model_type="causal", batch_size=8, device="cpu"
     )
-    
+
     causal_results = causal_predictor(doc, window_size=4)
-    
+
     print(f"Mean surprisal: {causal_results.mean_surprisal:.4f}")
     print(f"Mean entropy: {causal_results.mean_entropy:.4f}")
     print("\nPer-token results:")
     for token in causal_results:
-        print(f"  {token.text:12s} - prob: {token.mean_prob:.4f}, loss: {token.mean_loss:.4f}")
-        print(f"  {token.text:12s} - prob: {token.mean_prob:.4f}, loss: {token.mean_loss:.4f}")
+        print(
+            f"  {token.text:12s} - prob: {token.mean_prob:.4f}, loss: {token.mean_loss:.4f}"
+        )
