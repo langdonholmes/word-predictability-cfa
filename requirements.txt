@@ -2,6 +2,7 @@
 torch==2.6.0
 transformers==4.49.0
 spacy==3.8.4
+lexicalrichness==0.5.1
 
 # Data processing
 pandas==2.3.3
