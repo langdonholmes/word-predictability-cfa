@@ -33,7 +33,7 @@
 	// Use 'forwardPorts' to make a list of ports inside the container available locally.
 	// "forwardPorts": [],
 	// Use 'postCreateCommand' to run commands after the container is created.
-	"postCreateCommand": "pip install pip-tools pytest asgi-lifespan",
+	// "postCreateCommand": "pip install pip-tools pytest asgi-lifespan",
 	// Install requirements here so the Docker image can persist across
 	// Changes to requirements.in
 	// "postStartCommand": "pip install -r requirements/requirements.in",
