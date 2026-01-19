@@ -9,7 +9,9 @@ library(tidyverse)
 original_df <- read.csv('../../data/clc_fce_metrics_predictability_original.csv') %>%
   mutate(across(where(is.numeric) & !any_of("doc_id"),
                 ~ as.numeric(scale(.))
-  ))
+  )) %>% 
+  mutate(across(c(error_grammar, error_vocab, error_spelling, token_freq), ~ . * -1)) %>% 
+  select(doc_id, word_count, clause_count, tunit_count, MTLD, lexical_density, token_freq, clauses_per_tunit, mod_per_nom, dep_per_nom, amod, dobj, advmod, error_grammar, error_vocab, error_spelling, mean_prob) #, mean_loss, mean_entropy) 
 
 corrected_df = read.csv('../../data/clc_fce_metrics_predictability_corrected.csv') %>%
   mutate(across(where(is.numeric) & !any_of("doc_id"),
@@ -18,25 +20,26 @@ corrected_df = read.csv('../../data/clc_fce_metrics_predictability_corrected.csv
 ```
 
 ```{r}
+# Capture the original column order
+col_order <- original_df %>%   
+  select(where(is.numeric) & !any_of("doc_id")) %>% 
+  names()
+
 original_df  %>%   
   select(where(is.numeric) & !any_of("doc_id")) %>% 
-  cor()
-```
-
-
-```{r}
-original_df  %>%   
-  select(where(is.numeric) & !any_of("doc_id")) %>% 
-  cor() %>% 
+  cor(use="pairwise.complete.obs") %>% 
   as_tibble(rownames = 'var_a') %>% 
   pivot_longer(
     -var_a,
     names_to = "var_b", 
     values_to = "correlation"
   ) %>% 
+  mutate(
+    var_a = factor(var_a, levels = col_order),
+    var_b = factor(var_b, levels = col_order)
+  ) %>%
   ggplot(aes(var_a, var_b)) +
   geom_tile(aes(fill = correlation), color = 'black') +
-  # geom_text(aes(label = round(correlation, 2))) +
   theme_minimal(
     base_size = 16,
     base_family = 'Source Sans Pro'
@@ -46,7 +49,52 @@ original_df  %>%
     y = element_blank(),
     fill = 'Correlation',
     title = "Variables of the CLC-FCE",
-  )
+  ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+```
+
+
+```{r}
+model_bifactor <- '
+  G =~ MTLD + token_freq + lexical_density +
+       amod + advmod + dobj +
+       error_grammar + error_vocab + error_spelling + mean_prob
+  
+  S_Lex =~ MTLD + token_freq + lexical_density
+  S_Acc =~ error_grammar + error_vocab + error_spelling + mean_prob
+  
+  G ~~ 0*S_Lex + 0*S_Acc
+  S_Lex ~~ 0*S_Acc
+'
+
+fit_bifactor <- sem(model_bifactor, data = original_df, 
+                    orthogonal = TRUE, bounds=TRUE)  # Reinforce orthogonality
+
+summary(fit_bifactor, fit.measures = TRUE, standardized = TRUE)
+```
+
+```{r}
+model_bifactor <- '
+  # General factor loads on all indicators
+  G =~ MTLD + token_freq + lexical_density +
+       amod + advmod + dobj +
+       error_grammar + error_vocab + error_spelling + mean_prob
+  
+  # Specific factors capture residual covariance within groups
+  S_Lex =~ MTLD + token_freq + lexical_density
+  S_Phra =~ amod + advmod + dobj + mean_prob
+  S_Acc =~ error_grammar + error_vocab + error_spelling
+  
+  # Orthogonality constraints (all factors uncorrelated)
+  G ~~ 0*S_Lex + 0*S_Phra + 0*S_Acc
+  S_Lex ~~ 0*S_Phra + 0*S_Acc
+  S_Phra ~~ 0*S_Acc
+'
+
+fit_bifactor <- sem(model_bifactor, data = original_df, 
+                    orthogonal = TRUE, bounds=TRUE)  # Reinforce orthogonality
+
+summary(fit_bifactor, fit.measures = TRUE, standardized = TRUE)
 ```
 
 # =============================================================================
@@ -58,17 +106,17 @@ model1 <- '
   # First-order factors (sub-components of Complexity)
   LexSoph =~ MTLD + token_freq + lexical_density
   SynComp =~ clauses_per_tunit + mod_per_nom + dep_per_nom
-  PhraSoph =~ amod + advmod + dobj # + mean_prob
+  PhraSoph =~ amod + advmod + dobj# + mean_prob
   
   # Second-order factor (Complexity)
-  Complexity =~ LexSoph + SynComp + PhraSoph
+  #Complexity =~ LexSoph + SynComp + PhraSoph
   
   # Other first-order factors
   Accuracy =~ error_grammar + error_vocab + error_spelling
-  Fluency =~ word_count + tunit_count + clause_count
+  #Fluency =~ word_count + tunit_count + clause_count
   
   # Third-order factor (Language Proficiency)
-  LangProf =~ Complexity + Accuracy + Fluency
+  #LangProf =~ Complexity + Accuracy + Fluency
 '
 
 # Fit the model
