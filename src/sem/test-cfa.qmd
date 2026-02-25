@@ -1,5 +1,4 @@
 ```{r}
-library(tidySEM)
 library(lavaan)
 library(ggplot2)
 library(tidyverse)
