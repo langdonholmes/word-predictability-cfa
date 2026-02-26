@@ -1,0 +1,781 @@
+---
+title: "Network Analysis of ELLIPSE Analytic Ratings & Word Predictability"
+subtitle: "How Does Word Predictability Relate to Human-Rated Dimensions of L2 Writing Quality?"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: true
+    self-contained: true
+execute:
+  warning: false
+  message: false
+---
+
+# Overview
+
+This analysis complements `network-analysis.qmd` (which examines computed linguistic metrics)
+by asking the complementary question: how does word predictability relate to **human-rated
+analytic dimensions** of L2 writing quality?
+
+We model a Gaussian Graphical Model (GGM) over 7 variables — 6 analytic rating dimensions
+(averaged across 2 raters) plus word predictability (`mean_loss`) — to discover the partial
+correlation structure among these constructs.
+
+**Key question:** Which analytic dimensions of writing quality does word predictability
+connect to most strongly, and does it form its own community or integrate with one of the
+rated dimensions?
+
+# Section 1 — Setup & Data Preparation
+
+```{r}
+#| label: setup
+library(tidyverse)
+library(psych)
+library(corrplot)
+library(qgraph)
+library(bootnet)
+library(networktools)
+library(igraph)
+library(EGAnet)
+library(lavaan)
+```
+
+```{r}
+#| label: load-data
+
+# Use readr::read_csv to handle quoted newlines in the Text column
+df_raw <- readr::read_csv("../../data/ellipse_raw_rater_scores_anon_all_essay_w_predictability.csv",
+                          show_col_types = FALSE)
+
+cat("Raw data:", nrow(df_raw), "rows x", ncol(df_raw), "columns\n")
+```
+
+```{r}
+#| label: average-raters
+
+# Compute mean across 2 raters for each analytic dimension
+df_raw <- df_raw %>%
+  mutate(
+    Cohesion_mean     = rowMeans(across(c(Cohesion_1, Cohesion_2)), na.rm = TRUE),
+    Syntax_mean       = rowMeans(across(c(Syntax_1, Syntax_2)), na.rm = TRUE),
+    Vocabulary_mean   = rowMeans(across(c(Vocabulary_1, Vocabulary_2)), na.rm = TRUE),
+    Phraseology_mean  = rowMeans(across(c(Phraseology_1, Phraseology_2)), na.rm = TRUE),
+    Grammar_mean      = rowMeans(across(c(Grammar_1, Grammar_2)), na.rm = TRUE),
+    Conventions_mean  = rowMeans(across(c(Conventions_1, Conventions_2)), na.rm = TRUE),
+    Overall_mean      = rowMeans(across(c(Overall_1, Overall_2)), na.rm = TRUE)
+  )
+
+cat("Rater-averaged columns created.\n")
+cat("Rater agreement (correlation across raters):\n")
+dims <- c("Cohesion", "Syntax", "Vocabulary", "Phraseology", "Grammar", "Conventions", "Overall")
+for (d in dims) {
+  r <- cor(df_raw[[paste0(d, "_1")]], df_raw[[paste0(d, "_2")]], use = "complete.obs")
+  cat(sprintf("  %s: r = %.3f\n", d, r))
+}
+```
+
+```{r}
+#| label: select-features
+
+# Select the 7 analysis variables
+feature_vars <- c(
+  "Vocabulary_mean", "Phraseology_mean",   # Content
+  "Grammar_mean", "Conventions_mean", "Syntax_mean",  # Form
+  "Cohesion_mean",                          # Discourse
+  "mean_loss"                               # Predictability
+)
+
+df_features <- df_raw[, feature_vars]
+
+cat("Selected", ncol(df_features), "variables for network analysis.\n")
+```
+
+```{r}
+#| label: missing-data
+
+# Report missingness
+missing_counts <- colSums(is.na(df_features))
+cat("Missing values per variable:\n")
+print(missing_counts[missing_counts > 0])
+cat("\nTotal rows before listwise deletion:", nrow(df_features), "\n")
+
+# Listwise deletion
+df_complete <- df_features %>% drop_na()
+cat("Total rows after listwise deletion:", nrow(df_complete),
+    "(dropped", nrow(df_features) - nrow(df_complete), "rows)\n")
+```
+
+```{r}
+#| label: winsorize
+
+# Winsorize at 1st/99th percentiles
+winsorize <- function(x, probs = c(0.01, 0.99)) {
+  q <- quantile(x, probs = probs, na.rm = TRUE)
+  x[x < q[1]] <- q[1]
+  x[x > q[2]] <- q[2]
+  x
+}
+
+df_win <- df_complete %>%
+  mutate(across(everything(), winsorize))
+
+cat("Winsorized all variables at 1st/99th percentiles.\n")
+```
+
+```{r}
+#| label: define-groups
+
+# Theoretical groupings for coloring
+groups <- list(
+  Content        = c("Vocabulary_mean", "Phraseology_mean"),
+  Form           = c("Grammar_mean", "Conventions_mean", "Syntax_mean"),
+  Discourse      = c("Cohesion_mean"),
+  Predictability = c("mean_loss")
+)
+
+# Short labels for plotting
+short_labels <- c(
+  Vocabulary_mean  = "Voc",
+  Phraseology_mean = "Phr",
+  Grammar_mean     = "Gra",
+  Conventions_mean = "Con",
+  Syntax_mean      = "Syn",
+  Cohesion_mean    = "Coh",
+  mean_loss        = "Loss"
+)
+
+# Color scheme
+group_colors <- c(
+  Content        = "#E41A1C",  # red
+  Form           = "#377EB8",  # blue
+  Discourse      = "#FF7F00",  # orange
+  Predictability = "#984EA3"   # purple
+)
+
+# Map each variable to its group color
+node_colors <- character(ncol(df_win))
+names(node_colors) <- names(df_win)
+for (g in names(groups)) {
+  node_colors[groups[[g]]] <- group_colors[g]
+}
+```
+
+
+# Section 2 — Descriptive Statistics & Correlation Matrix
+
+```{r}
+#| label: descriptive-stats
+#| tbl-cap: "Descriptive statistics for all network variables"
+
+desc_stats <- describe(df_win)
+print(desc_stats[, c("n", "mean", "sd", "min", "max", "skew", "kurtosis")], digits = 3)
+```
+
+```{r}
+#| label: correlation-heatmap
+#| fig-cap: "Pearson correlation matrix of all network variables"
+#| fig-width: 8
+#| fig-height: 7
+
+cor_mat <- cor(df_win, use = "pairwise.complete.obs")
+
+# Use short labels for readability
+colnames(cor_mat) <- short_labels[colnames(cor_mat)]
+rownames(cor_mat) <- short_labels[rownames(cor_mat)]
+
+corrplot(cor_mat, method = "color", type = "lower",
+         tl.col = "black", tl.cex = 1.0,
+         addCoef.col = "black", number.cex = 0.8,
+         col = colorRampPalette(c("#2166AC", "white", "#B2182B"))(200),
+         diag = FALSE)
+```
+
+```{r}
+#| label: normality-check
+#| fig-cap: "Distribution of all network variables"
+#| fig-width: 10
+#| fig-height: 6
+
+df_win %>%
+  pivot_longer(everything(), names_to = "variable", values_to = "value") %>%
+  mutate(variable = short_labels[variable]) %>%
+  ggplot(aes(x = value)) +
+  geom_histogram(bins = 40, fill = "steelblue", color = "white", linewidth = 0.2) +
+  facet_wrap(~ variable, scales = "free", ncol = 4) +
+  theme_minimal(base_size = 11) +
+  labs(x = NULL, y = "Count")
+```
+
+
+# Section 3 — Network Estimation (EBICglasso)
+
+```{r}
+#| label: estimate-network
+
+# Estimate Gaussian Graphical Model using EBICglasso
+network <- estimateNetwork(df_win, default = "EBICglasso", tuning = 0.5)
+
+cat("Network estimated with", ncol(network$graph), "nodes\n")
+cat("Non-zero edges:", sum(network$graph[upper.tri(network$graph)] != 0),
+    "out of", sum(upper.tri(network$graph)), "possible\n")
+cat("Sparsity:", round(1 - mean(network$graph[upper.tri(network$graph)] != 0), 3), "\n")
+```
+
+```{r}
+#| label: adjacency-matrix
+#| tbl-cap: "Weighted adjacency matrix (partial correlations)"
+
+adj_mat <- round(network$graph, 3)
+colnames(adj_mat) <- short_labels[colnames(adj_mat)]
+rownames(adj_mat) <- short_labels[rownames(adj_mat)]
+print(adj_mat)
+```
+
+
+# Section 4 — Network Visualization
+
+```{r}
+#| label: network-spring
+#| fig-cap: "GGM network (spring layout, Fruchterman-Reingold)"
+#| fig-width: 10
+#| fig-height: 10
+
+# Assign short labels for the plot
+net_labels <- short_labels[colnames(network$graph)]
+
+spring_layout <- qgraph(network$graph,
+       layout = "spring",
+       labels = net_labels,
+       groups = groups,
+       color = group_colors,
+       legend = TRUE,
+       legend.cex = 0.5,
+       borders = TRUE,
+       border.width = 1.5,
+       vsize = 10,
+       esize = 8,
+       edge.color = NULL,
+       posCol = "#2166AC",
+       negCol = "#B2182B",
+       title = "ELLIPSE Analytic Ratings & Predictability — GGM Network",
+       title.cex = 1.2)
+```
+
+```{r}
+#| label: save-spring-plot
+#| include: false
+
+pdf("../../fig/ratings_network_spring.pdf", width = 10, height = 10)
+qgraph(network$graph,
+       layout = "spring",
+       labels = net_labels,
+       groups = groups,
+       color = group_colors,
+       legend = TRUE,
+       legend.cex = 0.5,
+       borders = TRUE,
+       border.width = 1.5,
+       vsize = 10,
+       esize = 8,
+       posCol = "#2166AC",
+       negCol = "#B2182B",
+       title = "ELLIPSE Analytic Ratings & Predictability — GGM Network")
+dev.off()
+cat("Saved to fig/ratings_network_spring.pdf\n")
+```
+
+```{r}
+#| label: network-circle
+#| fig-cap: "GGM network (circle layout)"
+#| fig-width: 10
+#| fig-height: 10
+
+qgraph(network$graph,
+       layout = "circle",
+       labels = net_labels,
+       groups = groups,
+       color = group_colors,
+       legend = TRUE,
+       legend.cex = 0.5,
+       borders = TRUE,
+       border.width = 1.5,
+       vsize = 10,
+       esize = 8,
+       posCol = "#2166AC",
+       negCol = "#B2182B",
+       title = "ELLIPSE Analytic Ratings & Predictability — GGM Network (Circle)")
+```
+
+
+# Section 5 — Centrality Analysis
+
+```{r}
+#| label: centrality-plot
+#| fig-cap: "Centrality indices for all nodes"
+#| fig-width: 10
+#| fig-height: 6
+
+centralityPlot(network$graph, labels = net_labels,
+               include = c("Strength", "Betweenness", "Closeness", "ExpectedInfluence"),
+               orderBy = "Strength")
+```
+
+```{r}
+#| label: centrality-table
+#| tbl-cap: "Centrality values for all nodes"
+
+cent <- centrality_auto(network$graph)$node.centrality
+cent$Variable <- short_labels[rownames(cent)]
+cent <- cent %>% select(Variable, everything())
+print(cent %>% arrange(desc(Strength)), digits = 3)
+```
+
+```{r}
+#| label: predictability-edges
+#| tbl-cap: "Edge weights involving mean_loss"
+
+# Extract edges for mean_loss
+adj <- network$graph
+loss_edges <- adj["mean_loss", ]
+
+pred_edges <- data.frame(
+  Partner = short_labels[names(loss_edges)],
+  Loss_edge = round(loss_edges, 3)
+) %>%
+  filter(Partner != "Loss") %>%
+  arrange(desc(abs(Loss_edge)))
+
+cat("Strongest connections of mean_loss:\n")
+print(pred_edges)
+```
+
+
+# Section 6 — Community Detection (EGA)
+
+```{r}
+#| label: ega
+#| fig-cap: "Exploratory Graph Analysis — community detection"
+#| fig-width: 10
+#| fig-height: 10
+
+ega_result <- EGA(df_win, model = "glasso",
+                  algorithm = "walktrap",
+                  plot.EGA = TRUE)
+
+cat("\nNumber of communities detected:", ega_result$n.dim, "\n")
+cat("\nCommunity assignments:\n")
+
+# Show assignments with short labels
+assignments <- data.frame(
+  Variable = short_labels[names(ega_result$wc)],
+  Full_name = names(ega_result$wc),
+  Community = ega_result$wc
+)
+print(assignments %>% arrange(Community))
+```
+
+```{r}
+#| label: ega-predictability
+
+# Highlight where predictability ended up
+cat("Predictability node assignment:\n")
+cat("  mean_loss -> Community", ega_result$wc["mean_loss"], "\n")
+
+# What else is in that community?
+comm <- ega_result$wc["mean_loss"]
+members <- names(ega_result$wc)[ega_result$wc == comm]
+cat("\nCommunity", comm, "(containing Loss):\n")
+cat("  Members:", paste(short_labels[members], collapse = ", "), "\n")
+```
+
+```{r}
+#| label: boot-ega
+#| fig-cap: "Bootstrap EGA — stability of community assignments"
+
+set.seed(42)
+boot_ega <- bootEGA(df_win, iter = 500,
+                    model = "glasso",
+                    algorithm = "walktrap",
+                    type = "parametric",
+                    verbose = FALSE)
+
+cat("Modal number of communities across bootstraps:",
+    as.numeric(names(sort(table(boot_ega$n.dim), decreasing = TRUE))[1]), "\n")
+
+# Structural consistency
+cat("\nItem stability (proportion of bootstraps in modal community):\n")
+stab <- boot_ega$frequency
+print(round(stab, 3))
+```
+
+
+# Section 7 — Network Stability (bootnet)
+
+```{r}
+#| label: boot-edges
+#| fig-cap: "Bootstrap confidence intervals for edge weights"
+#| fig-width: 12
+#| fig-height: 8
+
+set.seed(42)
+boot_nonparam <- bootnet(network, nBoots = 1000, type = "nonparametric",
+                         nCores = parallel::detectCores() - 1,
+                         verbose = FALSE)
+
+plot(boot_nonparam, labels = net_labels,
+     order = "sample", CIstyle = "quantiles")
+```
+
+```{r}
+#| label: save-edge-boot
+#| include: false
+
+pdf("../../fig/ratings_network_edge_bootstrap.pdf", width = 12, height = 8)
+plot(boot_nonparam, labels = net_labels,
+     order = "sample", CIstyle = "quantiles")
+dev.off()
+cat("Saved to fig/ratings_network_edge_bootstrap.pdf\n")
+```
+
+```{r}
+#| label: boot-centrality
+#| fig-cap: "Case-dropping bootstrap for centrality stability"
+#| fig-width: 10
+#| fig-height: 6
+
+set.seed(42)
+boot_case <- bootnet(network, nBoots = 1000, type = "case",
+                     statistics = c("strength", "expectedInfluence",
+                                    "betweenness", "closeness"),
+                     nCores = parallel::detectCores() - 1,
+                     verbose = FALSE)
+
+plot(boot_case, statistics = c("strength", "expectedInfluence",
+                                "betweenness", "closeness"))
+```
+
+```{r}
+#| label: cs-coefficients
+
+cs_coefs <- corStability(boot_case)
+cat("CS-coefficients (correlation stability):\n")
+print(cs_coefs)
+
+cat("\nInterpretation guidelines:\n")
+cat("  CS >= 0.50: Good, centrality is stable and interpretable\n")
+cat("  CS >= 0.25: Acceptable minimum\n")
+cat("  CS < 0.25: Centrality should NOT be interpreted\n")
+```
+
+
+# Section 8 — Bridge Centrality
+
+```{r}
+#| label: bridge-centrality
+#| fig-cap: "Bridge centrality using EGA-derived communities"
+#| fig-width: 10
+#| fig-height: 6
+
+# Use EGA communities for bridge analysis
+ega_communities <- ega_result$wc
+n_communities <- length(unique(ega_communities))
+
+if (n_communities >= 2) {
+  bridge_result <- bridge(network$graph, communities = ega_communities)
+
+  # Manual plot — plot.bridge() is broken with newer ggplot2 (aes_string deprecated)
+  bridge_plot_df <- data.frame(
+    Variable = rep(short_labels[names(bridge_result$`Bridge Strength`)], 2),
+    Measure = rep(c("Bridge Strength", "Bridge Expected Influence (1-step)"), each = length(bridge_result$`Bridge Strength`)),
+    Value = c(bridge_result$`Bridge Strength`, bridge_result$`Bridge Expected Influence (1-step)`)
+  )
+
+  bridge_plot_df %>%
+    mutate(Variable = reorder(Variable, Value)) %>%
+    ggplot(aes(x = Value, y = Variable)) +
+    geom_point(size = 3) +
+    geom_segment(aes(xend = 0, yend = Variable)) +
+    facet_wrap(~ Measure, scales = "free_x") +
+    theme_minimal(base_size = 12) +
+    labs(x = NULL, y = NULL)
+} else {
+  cat("EGA detected only", n_communities, "community — bridge centrality requires >= 2.\n")
+  cat("This is expected: the analytic rating dimensions are highly intercorrelated.\n")
+  cat("Using theoretical groups for bridge analysis instead.\n\n")
+
+  # Fall back to theoretical groups
+  theory_communities <- setNames(
+    c(rep(1, 2), rep(2, 3), 3, 4),
+    c("Vocabulary_mean", "Phraseology_mean",
+      "Grammar_mean", "Conventions_mean", "Syntax_mean",
+      "Cohesion_mean", "mean_loss")
+  )
+
+  bridge_result <- bridge(network$graph, communities = theory_communities)
+
+  bridge_plot_df <- data.frame(
+    Variable = rep(short_labels[names(bridge_result$`Bridge Strength`)], 2),
+    Measure = rep(c("Bridge Strength", "Bridge Expected Influence (1-step)"), each = length(bridge_result$`Bridge Strength`)),
+    Value = c(bridge_result$`Bridge Strength`, bridge_result$`Bridge Expected Influence (1-step)`)
+  )
+
+  bridge_plot_df %>%
+    mutate(Variable = reorder(Variable, Value)) %>%
+    ggplot(aes(x = Value, y = Variable)) +
+    geom_point(size = 3) +
+    geom_segment(aes(xend = 0, yend = Variable)) +
+    facet_wrap(~ Measure, scales = "free_x") +
+    theme_minimal(base_size = 12) +
+    labs(x = NULL, y = NULL,
+         title = "Bridge centrality (using theoretical groups)")
+}
+```
+
+```{r}
+#| label: bridge-table
+#| tbl-cap: "Bridge centrality values"
+
+# Use theoretical groups if EGA found only 1 community
+if (n_communities >= 2) {
+  comm_labels <- ega_communities[names(bridge_result$`Bridge Strength`)]
+} else {
+  comm_labels <- theory_communities[names(bridge_result$`Bridge Strength`)]
+}
+
+bridge_df <- data.frame(
+  Variable = short_labels[names(bridge_result$`Bridge Strength`)],
+  Bridge_Strength = round(bridge_result$`Bridge Strength`, 3),
+  Bridge_EI = round(bridge_result$`Bridge Expected Influence (1-step)`, 3),
+  Community = comm_labels
+) %>%
+  arrange(desc(Bridge_Strength))
+
+print(bridge_df)
+
+cat("\nPredictability bridge centrality:\n")
+print(bridge_df %>% filter(Variable == "Loss"))
+```
+
+
+# Section 9 — Network Comparison by Proficiency Level
+
+```{r}
+#| label: proficiency-split
+
+# Use Overall_mean computed earlier for proficiency groups
+df_with_prof <- df_raw %>%
+  select(all_of(feature_vars), Overall_mean) %>%
+  drop_na()
+
+# Define proficiency groups
+df_with_prof <- df_with_prof %>%
+  mutate(prof_group = case_when(
+    Overall_mean <= 2.5 ~ "Low",
+    Overall_mean >= 4.0 ~ "High",
+    TRUE ~ "Mid"
+  ))
+
+cat("Proficiency group sizes:\n")
+print(table(df_with_prof$prof_group))
+
+df_low <- df_with_prof %>%
+  filter(prof_group == "Low") %>%
+  select(all_of(feature_vars)) %>%
+  mutate(across(everything(), winsorize))
+
+df_high <- df_with_prof %>%
+  filter(prof_group == "High") %>%
+  select(all_of(feature_vars)) %>%
+  mutate(across(everything(), winsorize))
+
+cat("\nLow proficiency n:", nrow(df_low), "\n")
+cat("High proficiency n:", nrow(df_high), "\n")
+```
+
+```{r}
+#| label: estimate-group-networks
+
+net_low <- estimateNetwork(df_low, default = "EBICglasso", tuning = 0.5)
+net_high <- estimateNetwork(df_high, default = "EBICglasso", tuning = 0.5)
+```
+
+```{r}
+#| label: group-network-plots
+#| fig-cap: "Network comparison: Low vs High proficiency"
+#| fig-width: 14
+#| fig-height: 7
+
+# Use the same layout for both (average of spring layouts)
+avg_layout <- averageLayout(net_low$graph, net_high$graph)
+
+par(mfrow = c(1, 2))
+
+qgraph(net_low$graph,
+       layout = avg_layout,
+       labels = net_labels,
+       groups = groups,
+       color = group_colors,
+       legend = FALSE,
+       borders = TRUE,
+       border.width = 1.5,
+       vsize = 9,
+       esize = 8,
+       posCol = "#2166AC",
+       negCol = "#B2182B",
+       title = "Low Proficiency",
+       title.cex = 1.3,
+       maximum = max(abs(c(net_low$graph, net_high$graph))))
+
+qgraph(net_high$graph,
+       layout = avg_layout,
+       labels = net_labels,
+       groups = groups,
+       color = group_colors,
+       legend = FALSE,
+       borders = TRUE,
+       border.width = 1.5,
+       vsize = 9,
+       esize = 8,
+       posCol = "#2166AC",
+       negCol = "#B2182B",
+       title = "High Proficiency",
+       title.cex = 1.3,
+       maximum = max(abs(c(net_low$graph, net_high$graph))))
+
+par(mfrow = c(1, 1))
+```
+
+```{r}
+#| label: save-group-plots
+#| include: false
+
+pdf("../../fig/ratings_network_group_comparison.pdf", width = 14, height = 7)
+par(mfrow = c(1, 2))
+qgraph(net_low$graph,
+       layout = avg_layout, labels = net_labels,
+       groups = groups, color = group_colors, legend = FALSE,
+       borders = TRUE, border.width = 1.5, vsize = 9, esize = 8,
+       posCol = "#2166AC", negCol = "#B2182B",
+       title = "Low Proficiency", title.cex = 1.3,
+       maximum = max(abs(c(net_low$graph, net_high$graph))))
+qgraph(net_high$graph,
+       layout = avg_layout, labels = net_labels,
+       groups = groups, color = group_colors, legend = FALSE,
+       borders = TRUE, border.width = 1.5, vsize = 9, esize = 8,
+       posCol = "#2166AC", negCol = "#B2182B",
+       title = "High Proficiency", title.cex = 1.3,
+       maximum = max(abs(c(net_low$graph, net_high$graph))))
+par(mfrow = c(1, 1))
+dev.off()
+cat("Saved to fig/ratings_network_group_comparison.pdf\n")
+```
+
+```{r}
+#| label: nct
+#| output: false
+
+set.seed(42)
+nct_result <- NetworkComparisonTest::NCT(
+  net_low, net_high,
+  it = 1000,
+  test.edges = TRUE,
+  test.centrality = TRUE,
+  centrality = c("strength", "expectedInfluence"),
+  verbose = FALSE
+)
+```
+
+```{r}
+#| label: nct-results
+
+cat("=== Network Comparison Test Results ===\n\n")
+
+cat("1. Omnibus test (network structure invariance):\n")
+cat("   M statistic:", round(nct_result$nwinv.real, 4), "\n")
+cat("   p-value:", round(nct_result$nwinv.pval, 4), "\n\n")
+
+cat("2. Global strength invariance:\n")
+cat("   Strength difference:", round(nct_result$glstrinv.real, 4), "\n")
+cat("   p-value:", round(nct_result$glstrinv.pval, 4), "\n\n")
+
+cat("3. Significant individual edge differences (p < 0.05):\n")
+sig_edges <- nct_result$einv.pvals %>%
+  filter(`p-value` < 0.05)
+
+if (nrow(sig_edges) > 0) {
+  print(sig_edges)
+} else {
+  cat("   No individual edges significantly differ between groups.\n")
+}
+```
+
+```{r}
+#| label: nct-predictability
+
+# Focus on predictability-related edge differences
+cat("Edge weight differences involving predictability nodes:\n\n")
+
+adj_low <- net_low$graph
+adj_high <- net_high$graph
+
+pred_comparison <- data.frame(
+  Partner = short_labels[colnames(adj_low)],
+  Low_Loss = round(adj_low["mean_loss", ], 3),
+  High_Loss = round(adj_high["mean_loss", ], 3),
+  Diff_Loss = round(adj_high["mean_loss", ] - adj_low["mean_loss", ], 3)
+) %>%
+  filter(Partner != "Loss") %>%
+  arrange(desc(abs(Diff_Loss)))
+
+print(pred_comparison)
+```
+
+
+# Summary & Interpretation
+
+```{r}
+#| label: summary
+
+cat("=" %>% strrep(60), "\n")
+cat("SUMMARY OF RATINGS NETWORK ANALYSIS\n")
+cat("=" %>% strrep(60), "\n\n")
+
+# 1. Community structure
+cat("1. COMMUNITY STRUCTURE (EGA)\n")
+cat("   Number of communities:", ega_result$n.dim, "\n")
+cat("   mean_loss assigned to community:", ega_result$wc["mean_loss"], "\n\n")
+
+# What's in the same community as predictability?
+pred_comm <- ega_result$wc["mean_loss"]
+same_comm <- names(ega_result$wc)[ega_result$wc == pred_comm]
+cat("   Variables in same community as predictability:\n")
+cat("  ", paste(short_labels[same_comm], collapse = ", "), "\n\n")
+
+# 2. Centrality
+cat("2. CENTRALITY\n")
+cent_sorted <- cent %>% arrange(desc(Strength))
+cat("   Top 3 by strength:", paste(cent_sorted$Variable[1:3], collapse = ", "), "\n")
+loss_rank <- which(cent_sorted$Variable == "Loss")
+cat("   mean_loss strength rank:", loss_rank, "of", nrow(cent_sorted), "\n\n")
+
+# 3. Bridge centrality
+cat("3. BRIDGE CENTRALITY\n")
+cat("   (See bridge table above for predictability bridge scores)\n\n")
+
+# 4. Strongest connections
+cat("4. PREDICTABILITY CONNECTIONS\n")
+cat("   Which analytic dimensions does predictability connect to most strongly?\n")
+print(pred_edges %>% filter(Loss_edge != 0))
+cat("\n")
+
+# 5. Stability
+cat("5. STABILITY\n")
+cat("   CS-coefficients reported in Section 7\n")
+cat("   Edge accuracy CIs reported in Section 7\n\n")
+
+# 6. Proficiency differences
+cat("6. PROFICIENCY GROUP DIFFERENCES\n")
+cat("   Network structure invariance p =", round(nct_result$nwinv.pval, 4), "\n")
+cat("   Global strength invariance p =", round(nct_result$glstrinv.pval, 4), "\n")
+```

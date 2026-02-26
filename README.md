@@ -33,13 +33,25 @@ Linguistic features are computed from spaCy parses and a SlimPajama reference co
 
 ```
 src/
-  predictor.py              # Word predictability calculation (ModernBERT)
-  process_docs.py           # Batch spaCy processing utilities
-  0-download-slim-pajama    # Download reference corpus
-  1-spacy-*                 # Parse texts to spaCy DocBin format
-  2-calculate-*             # Calculate predictability scores
-  3-calculate-metrics-*     # Calculate linguistic features
-  sem/                      # Structural equation / network modeling (R/Quarto)
+  features/                 # Linguistic feature calculators
+    predictability.py       # Word predictability (ModernBERT surprisal)
+    lexical.py              # MTLD, lexical density, token frequency, word length
+    syntactic.py            # WPS, clauses/T-unit, modifiers/nominal, dep distance
+    phraseological.py       # Dependency MI (amod, dobj, advmod)
+    cohesion.py             # Content word overlap, connective density, sentence sim
+  util/
+    paths.py                # Canonical path constants (DATA_DIR, FIG_DIR, etc.)
+    process_docs.py         # Batch spaCy processing utilities
+  pipeline/                 # Data processing scripts (run in order)
+    0_download_slim_pajama.py
+    1_spacy_slim_pajama.py
+    2_collate_slim_pajama.py
+    3_calculate_predictability.py
+    4_calculate_metrics.py
+  ch1_network/              # Network psychometric analysis (R/Quarto)
+  ch2_predictability/       # (planned)
+  ch3_invariance/           # (planned)
+  ch4_xai/                  # (planned)
 data/
   slim_pajama_docbins/      # Reference corpus DocBins
   slim_pajama_lists/        # N-gram and dependency statistics

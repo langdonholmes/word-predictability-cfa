@@ -1,0 +1,1 @@
+from .paths import SRC_DIR, PROJECT_ROOT, DATA_DIR, FIG_DIR, RESULTS_DIR

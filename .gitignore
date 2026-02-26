@@ -15,6 +15,9 @@ results/
 # Development artifacts
 src/__*
 
+# Quarto render output
+**/*.html
+
 # OS files
 .DS_Store
 Thumbs.db
