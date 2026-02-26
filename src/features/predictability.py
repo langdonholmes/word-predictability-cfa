@@ -174,6 +174,16 @@ class DocPredictability:
             [t.mean_entropy for t in self.tokens if np.isfinite(t.mean_entropy)]
         )
 
+    @property
+    def var_loss(self) -> float:
+        """Variance of per-token mean_loss across all tokens."""
+        if not self.tokens:
+            return 0.0
+        finite_losses = [t.mean_loss for t in self.tokens if np.isfinite(t.mean_loss)]
+        if len(finite_losses) < 2:
+            return 0.0
+        return float(np.var(finite_losses, ddof=1))
+
 
 class Predictor:
     """

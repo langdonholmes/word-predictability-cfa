@@ -25,7 +25,7 @@ def main():
         torch.set_float32_matmul_precision("high")
 
     # Load the dataset
-    df = pd.read_csv(DATA_DIR / "ellipse_raw_rater_scores_anon_all_essay.csv")
+    df = pd.read_csv(DATA_DIR / "ELLIPSE_Final_github.csv")
     print(f"Loaded {len(df)} essays")
 
     # Load spaCy
@@ -55,16 +55,17 @@ def main():
     print(f"Predictor initialized (device={device})")
 
     # Process each essay
-    results = {"mean_loss": [], "mean_prob": [], "mean_entropy": []}
+    results = {"mean_loss": [], "mean_prob": [], "mean_entropy": [], "var_loss": []}
     print(f"Processing {len(df)} essays...\n")
 
     for idx, row in tqdm(df.iterrows(), total=len(df), desc="Calculating predictability"):
-        text = row["Text"]
+        text = row["full_text"]
 
         if pd.isna(text) or text.strip() == "":
             results["mean_loss"].append(None)
             results["mean_prob"].append(None)
             results["mean_entropy"].append(None)
+            results["var_loss"].append(None)
             continue
 
         try:
@@ -76,12 +77,14 @@ def main():
                 sum(t.mean_prob for t in doc_pred) / len(doc_pred)
             )
             results["mean_entropy"].append(doc_pred.mean_entropy)
+            results["var_loss"].append(doc_pred.var_loss)
 
         except Exception as e:
-            print(f"\nError processing essay {idx} (Filename: {row['Filename']}): {e}")
+            print(f"\nError processing essay {idx} (text_id_kaggle: {row['text_id_kaggle']}): {e}")
             results["mean_loss"].append(None)
             results["mean_prob"].append(None)
             results["mean_entropy"].append(None)
+            results["var_loss"].append(None)
 
     print("\nProcessing complete!")
 
@@ -89,11 +92,12 @@ def main():
     df["mean_loss"] = results["mean_loss"]
     df["mean_prob"] = results["mean_prob"]
     df["mean_entropy"] = results["mean_entropy"]
+    df["var_loss"] = results["var_loss"]
 
     print("Summary statistics for predictability metrics:\n")
-    print(df[["mean_loss", "mean_prob", "mean_entropy"]].describe())
+    print(df[["mean_loss", "mean_prob", "mean_entropy", "var_loss"]].describe())
 
-    output_path = DATA_DIR / "ellipse_raw_rater_scores_anon_all_essay_w_predictability.csv"
+    output_path = DATA_DIR / "ELLIPSE_Final_github_w_predictability.csv"
     df.to_csv(output_path, index=False)
     print(f"\nResults saved to: {output_path}")
 

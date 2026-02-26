@@ -56,8 +56,8 @@ feature_vars <- c(
   "amod_mi", "dobj_mi", "advmod_mi",
   # Cohesion (3)
   "content_word_overlap", "connective_density", "sentence_similarity",
-  # Predictability (1)
-  "mean_loss"
+  # Predictability (2)
+  "mean_loss", "var_loss"
 )
 
 df_features <- df_raw[, feature_vars]
@@ -76,7 +76,8 @@ cat("Dropped clauses_per_tunit (constant). Remaining:", ncol(df_features), "vari
 
 # mean_entropy removed due to near-perfect correlation with mean_loss (r = 0.97)
 # which created a trivial island in the network
-cat("Note: mean_entropy excluded (r = 0.97 with mean_loss). Using mean_loss only.\n")
+cat("Note: mean_entropy excluded (r = 0.97 with mean_loss). Using mean_loss + var_loss.\n")
+cat("var_loss captures consistency of predictability (variance of token-level loss).\n")
 ```
 
 ```{r}
@@ -89,7 +90,9 @@ print(missing_counts[missing_counts > 0])
 cat("\nTotal rows before listwise deletion:", nrow(df_features), "\n")
 
 # Listwise deletion
-df_complete <- df_features %>% drop_na()
+complete_idx <- complete.cases(df_features)
+df_complete <- df_features[complete_idx, ]
+prompt_complete <- df_raw$prompt[complete_idx]
 cat("Total rows after listwise deletion:", nrow(df_complete),
     "(dropped", nrow(df_features) - nrow(df_complete), "rows)\n")
 ```
@@ -119,6 +122,28 @@ cat("  connective_density: max =", max(df_win$connective_density), "\n")
 ```
 
 ```{r}
+#| label: residualize-on-prompt
+
+# Residualize all variables on prompt to remove systematic prompt-driven variance
+df_resid <- df_win
+r2_values <- numeric(ncol(df_win))
+names(r2_values) <- names(df_win)
+
+for (var in names(df_win)) {
+  fit <- lm(df_win[[var]] ~ factor(prompt_complete))
+  df_resid[[var]] <- residuals(fit)
+  r2_values[var] <- summary(fit)$r.squared
+}
+
+df_win <- df_resid  # all downstream code uses residualized data
+
+cat("R² (variance explained by prompt) per variable:\n")
+r2_df <- data.frame(Variable = names(r2_values), R2 = round(r2_values, 4))
+r2_df <- r2_df[order(-r2_df$R2), ]
+print(r2_df, row.names = FALSE)
+```
+
+```{r}
 #| label: define-groups
 
 # Theoretical groupings for coloring (after dropping clauses_per_tunit)
@@ -127,7 +152,7 @@ groups <- list(
   Syntactic     = c("words_per_sentence", "mod_per_nom", "mean_dep_distance"),
   Phraseological = c("amod_mi", "dobj_mi", "advmod_mi"),
   Cohesion      = c("content_word_overlap", "connective_density", "sentence_similarity"),
-  Predictability = c("mean_loss")
+  Predictability = c("mean_loss", "var_loss")
 )
 
 # Short labels for plotting
@@ -145,7 +170,8 @@ short_labels <- c(
   content_word_overlap = "CWO",
   connective_density = "ConnDen",
   sentence_similarity = "SentSim",
-  mean_loss = "Loss"
+  mean_loss = "Loss",
+  var_loss = "VarLoss"
 )
 
 # Color scheme
@@ -339,18 +365,20 @@ print(cent %>% arrange(desc(Strength)), digits = 3)
 #| label: predictability-edges
 #| tbl-cap: "Edge weights involving predictability nodes"
 
-# Extract edges for mean_loss
+# Extract edges for mean_loss and var_loss
 adj <- network$graph
 loss_edges <- adj["mean_loss", ]
+var_loss_edges <- adj["var_loss", ]
 
 pred_edges <- data.frame(
   Partner = short_labels[names(loss_edges)],
-  Loss_edge = round(loss_edges, 3)
+  Loss_edge = round(loss_edges, 3),
+  VarLoss_edge = round(var_loss_edges, 3)
 ) %>%
-  filter(Partner != "Loss") %>%
+  filter(!Partner %in% c("Loss", "VarLoss")) %>%
   arrange(desc(abs(Loss_edge)))
 
-cat("Strongest connections of mean_loss:\n")
+cat("Strongest connections of predictability nodes:\n")
 print(pred_edges)
 ```
 
@@ -383,14 +411,21 @@ print(assignments %>% arrange(Community))
 #| label: ega-predictability
 
 # Highlight where predictability ended up
-cat("Predictability node assignment:\n")
+cat("Predictability node assignments:\n")
 cat("  mean_loss -> Community", ega_result$wc["mean_loss"], "\n")
+cat("  var_loss  -> Community", ega_result$wc["var_loss"], "\n")
 
-# What else is in that community?
+# What else is in the same community as mean_loss?
 comm <- ega_result$wc["mean_loss"]
 members <- names(ega_result$wc)[ega_result$wc == comm]
 cat("\nCommunity", comm, "(containing Loss):\n")
 cat("  Members:", paste(short_labels[members], collapse = ", "), "\n")
+
+# What else is in the same community as var_loss?
+comm_var <- ega_result$wc["var_loss"]
+members_var <- names(ega_result$wc)[ega_result$wc == comm_var]
+cat("\nCommunity", comm_var, "(containing VarLoss):\n")
+cat("  Members:", paste(short_labels[members_var], collapse = ", "), "\n")
 ```
 
 ```{r}
@@ -518,7 +553,7 @@ bridge_df <- data.frame(
 print(bridge_df)
 
 cat("\nPredictability bridge centrality:\n")
-print(bridge_df %>% filter(Variable == "Loss"))
+print(bridge_df %>% filter(Variable %in% c("Loss", "VarLoss")))
 ```
 
 
@@ -527,14 +562,14 @@ print(bridge_df %>% filter(Variable == "Loss"))
 ```{r}
 #| label: proficiency-split
 
-# Compute mean overall rater score
+# Use single Overall score from public ELLIPSE data
 df_raw_complete <- df_raw[complete.cases(df_raw[, feature_vars[feature_vars != "clauses_per_tunit"]]), ]
-df_raw_complete$Overall_mean <- rowMeans(df_raw_complete[, c("Overall_1", "Overall_2")], na.rm = TRUE)
+prompt_raw_complete <- df_raw_complete$prompt
 
 # Define proficiency groups
 df_raw_complete$prof_group <- case_when(
-  df_raw_complete$Overall_mean <= 2.5 ~ "Low",
-  df_raw_complete$Overall_mean >= 4.0 ~ "High",
+  df_raw_complete$Overall <= 2.5 ~ "Low",
+  df_raw_complete$Overall >= 4.0 ~ "High",
   TRUE ~ "Mid"
 )
 
@@ -544,15 +579,27 @@ print(table(df_raw_complete$prof_group))
 # Select feature columns (without clauses_per_tunit)
 keep_vars <- setdiff(feature_vars, "clauses_per_tunit")
 
-df_low <- df_raw_complete %>%
-  filter(prof_group == "Low") %>%
-  select(all_of(keep_vars)) %>%
+# Low proficiency: winsorize then residualize on prompt
+low_idx <- df_raw_complete$prof_group == "Low"
+df_low <- df_raw_complete[low_idx, keep_vars] %>%
   mutate(across(everything(), winsorize))
+prompt_low <- prompt_raw_complete[low_idx]
 
-df_high <- df_raw_complete %>%
-  filter(prof_group == "High") %>%
-  select(all_of(keep_vars)) %>%
+for (var in names(df_low)) {
+  fit <- lm(df_low[[var]] ~ factor(prompt_low))
+  df_low[[var]] <- residuals(fit)
+}
+
+# High proficiency: winsorize then residualize on prompt
+high_idx <- df_raw_complete$prof_group == "High"
+df_high <- df_raw_complete[high_idx, keep_vars] %>%
   mutate(across(everything(), winsorize))
+prompt_high <- prompt_raw_complete[high_idx]
+
+for (var in names(df_high)) {
+  fit <- lm(df_high[[var]] ~ factor(prompt_high))
+  df_high[[var]] <- residuals(fit)
+}
 
 cat("\nLow proficiency n:", nrow(df_low), "\n")
 cat("High proficiency n:", nrow(df_high), "\n")
@@ -685,9 +732,12 @@ pred_comparison <- data.frame(
   Partner = short_labels[colnames(adj_low)],
   Low_Loss = round(adj_low["mean_loss", ], 3),
   High_Loss = round(adj_high["mean_loss", ], 3),
-  Diff_Loss = round(adj_high["mean_loss", ] - adj_low["mean_loss", ], 3)
+  Diff_Loss = round(adj_high["mean_loss", ] - adj_low["mean_loss", ], 3),
+  Low_VarLoss = round(adj_low["var_loss", ], 3),
+  High_VarLoss = round(adj_high["var_loss", ], 3),
+  Diff_VarLoss = round(adj_high["var_loss", ] - adj_low["var_loss", ], 3)
 ) %>%
-  filter(Partner != "Loss") %>%
+  filter(!Partner %in% c("Loss", "VarLoss")) %>%
   arrange(desc(abs(Diff_Loss)))
 
 print(pred_comparison)
@@ -706,13 +756,19 @@ cat("=" %>% strrep(60), "\n\n")
 # 1. Community structure
 cat("1. COMMUNITY STRUCTURE (EGA)\n")
 cat("   Number of communities:", ega_result$n.dim, "\n")
-cat("   mean_loss assigned to community:", ega_result$wc["mean_loss"], "\n\n")
+cat("   mean_loss assigned to community:", ega_result$wc["mean_loss"], "\n")
+cat("   var_loss assigned to community:", ega_result$wc["var_loss"], "\n\n")
 
 # What's in the same community as predictability?
 pred_comm <- ega_result$wc["mean_loss"]
 same_comm <- names(ega_result$wc)[ega_result$wc == pred_comm]
-cat("   Variables in same community as predictability:\n")
-cat("  ", paste(short_labels[same_comm], collapse = ", "), "\n\n")
+cat("   Variables in same community as mean_loss:\n")
+cat("  ", paste(short_labels[same_comm], collapse = ", "), "\n")
+
+varloss_comm <- ega_result$wc["var_loss"]
+same_comm_var <- names(ega_result$wc)[ega_result$wc == varloss_comm]
+cat("   Variables in same community as var_loss:\n")
+cat("  ", paste(short_labels[same_comm_var], collapse = ", "), "\n\n")
 
 # 2. Centrality
 cat("2. CENTRALITY\n")

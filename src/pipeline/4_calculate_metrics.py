@@ -1,6 +1,7 @@
 """Calculate linguistic features for ELLIPSE essays and merge with predictability."""
 
 import sys
+import shutil
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -17,7 +18,7 @@ from util.paths import DATA_DIR
 def main():
     # Load ELLIPSE data
     df = pd.read_csv(
-        DATA_DIR / "ellipse_raw_rater_scores_anon_all_essay_w_predictability.csv"
+        DATA_DIR / "ELLIPSE_Final_github_w_predictability.csv"
     )
     print(f"Loaded {len(df)} essays")
 
@@ -25,14 +26,19 @@ def main():
     nlp = spacy.load("en_core_web_lg", disable=["ner"])
     docbin_dir = DATA_DIR / "ellipse_docbins"
 
+    # Delete existing docbins (data source changed)
+    if docbin_dir.exists():
+        print(f"Removing old docbins at {docbin_dir}...")
+        shutil.rmtree(docbin_dir)
+
     if not docbin_dir.exists() or not any(docbin_dir.glob("*.spacy")):
         from util.process_docs import process_dataframe
 
         print("Processing essays with spaCy (this may take a while)...")
         process_dataframe(
             df=df,
-            text_col="Text",
-            metadata_col="Filename",
+            text_col="full_text",
+            metadata_col="text_id_kaggle",
             output_dir=str(docbin_dir),
             model="en_core_web_lg",
             n_process=32,
@@ -72,23 +78,21 @@ def main():
     results = []
     for i, doc in tqdm(enumerate(docs), total=len(docs), desc="Calculating features"):
         features = calculate_all_features(doc, token_freq, total_tokens, mi_calculator)
-        features["Filename"] = filenames[i]
+        features["text_id_kaggle"] = filenames[i]
         results.append(features)
 
     df_features = pd.DataFrame(results)
     print(f"Computed features for {len(df_features)} documents")
 
-    # Merge with rater scores and predictability
-    rater_cols = [
-        "Overall_1", "Cohesion_1", "Syntax_1", "Vocabulary_1",
-        "Phraseology_1", "Grammar_1", "Conventions_1",
-        "Overall_2", "Cohesion_2", "Syntax_2", "Vocabulary_2",
-        "Phraseology_2", "Grammar_2", "Conventions_2",
+    # Merge with scores and predictability
+    score_cols = [
+        "Overall", "Cohesion", "Syntax", "Vocabulary",
+        "Phraseology", "Grammar", "Conventions",
     ]
-    predictability_cols = ["mean_loss", "mean_entropy"]
-    df_meta = df[["Filename"] + rater_cols + predictability_cols]
+    predictability_cols = ["mean_loss", "mean_entropy", "var_loss"]
+    df_meta = df[["text_id_kaggle", "prompt"] + score_cols + predictability_cols]
 
-    df_merged = pd.merge(df_meta, df_features, on="Filename", how="inner")
+    df_merged = pd.merge(df_meta, df_features, on="text_id_kaggle", how="inner")
     print(f"Merged dataframe: {df_merged.shape[0]} rows, {df_merged.shape[1]} columns")
 
     output_path = DATA_DIR / "ellipse_metrics.csv"
@@ -101,7 +105,7 @@ def main():
         "words_per_sentence", "mod_per_nom", "mean_dep_distance",
         "amod_mi", "dobj_mi", "advmod_mi",
         "content_word_overlap", "connective_density", "sentence_similarity",
-        "mean_loss", "mean_entropy",
+        "mean_loss", "mean_entropy", "var_loss",
     ]
     print("\n=== NaN Audit ===")
     nan_counts = df_merged[feature_cols].isna().sum()
