@@ -56,6 +56,7 @@ def main():
 
     # Process each essay
     results = {"mean_loss": [], "mean_prob": [], "mean_entropy": [], "var_loss": []}
+    token_records = []  # Per-token data for downstream analyses
     print(f"Processing {len(df)} essays...\n")
 
     for idx, row in tqdm(df.iterrows(), total=len(df), desc="Calculating predictability"):
@@ -79,6 +80,12 @@ def main():
             results["mean_entropy"].append(doc_pred.mean_entropy)
             results["var_loss"].append(doc_pred.var_loss)
 
+            # Collect per-token records
+            for token in doc_pred:
+                record = token.to_dict()
+                record["text_id_kaggle"] = row["text_id_kaggle"]
+                token_records.append(record)
+
         except Exception as e:
             print(f"\nError processing essay {idx} (text_id_kaggle: {row['text_id_kaggle']}): {e}")
             results["mean_loss"].append(None)
@@ -100,6 +107,12 @@ def main():
     output_path = DATA_DIR / "ELLIPSE_Final_github_w_predictability.csv"
     df.to_csv(output_path, index=False)
     print(f"\nResults saved to: {output_path}")
+
+    # Save per-token data as parquet
+    token_df = pd.DataFrame(token_records)
+    token_parquet_path = DATA_DIR / "ELLIPSE_token_predictability.parquet"
+    token_df.to_parquet(token_parquet_path, index=False)
+    print(f"Saved {len(token_df)} token records to: {token_parquet_path}")
 
 
 if __name__ == "__main__":

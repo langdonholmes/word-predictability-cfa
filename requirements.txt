@@ -17,6 +17,12 @@ lxml
 # Jupyter
 ipykernel
 
+# Visualization & clustering
+seaborn>=0.13.0
+scikit-learn>=1.4.0
+umap-learn>=0.5.5
+hdbscan>=0.8.33
+
 # Progress bars
 tqdm==4.67.1
 
