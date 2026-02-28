@@ -1,0 +1,49 @@
+[project]
+name = "predictive-processing"
+version = "0.1.0"
+description = "Predictive processing research"
+requires-python = ">=3.11"
+dependencies = [
+    # Core ML/NLP
+    "torch>=2.6.0",
+    "transformers>=4.49.0",
+    "spacy>=3.8.4",
+    "lexicalrichness>=0.5.1",
+    # Data processing
+    "pandas>=2.2.0",
+    "polars",
+    "numpy>=1.26.4",
+    "datasets>=3.3.2",
+    "pyarrow>=19.0.1",
+    # XML parsing
+    "lxml",
+    # Jupyter
+    "ipykernel",
+    # Visualization & analysis
+    "seaborn>=0.13.0",
+    "scikit-learn>=1.4.0",
+    "matplotlib",
+    # Progress bars
+    "tqdm>=4.67.0",
+]
+
+[project.optional-dependencies]
+clustering = [
+    "umap-learn>=0.5.5",
+    "hdbscan>=0.8.33",
+]
+lrp = [
+    "lxt>=2.1",
+    "transformers<5",
+]
+
+[tool.uv]
+index-url = "https://pypi.org/simple"
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu126" }

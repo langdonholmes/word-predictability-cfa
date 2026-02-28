@@ -6,6 +6,9 @@
 # Environment
 .env
 *.env
+.claude
+.venv/
+.python-version
 
 # Project directories
 data/
