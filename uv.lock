@@ -2344,6 +2344,7 @@ dependencies = [
     { name = "ipykernel" },
     { name = "lexicalrichness" },
     { name = "lxml" },
+    { name = "lxt" },
     { name = "matplotlib" },
     { name = "numpy" },
     { name = "pandas", version = "2.3.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14'" },
@@ -2363,10 +2364,6 @@ clustering = [
     { name = "hdbscan" },
     { name = "umap-learn" },
 ]
-lrp = [
-    { name = "lxt" },
-    { name = "transformers" },
-]
 
 [package.metadata]
 requires-dist = [
@@ -2375,7 +2372,7 @@ requires-dist = [
     { name = "ipykernel" },
     { name = "lexicalrichness", specifier = ">=0.5.1" },
     { name = "lxml" },
-    { name = "lxt", marker = "extra == 'lrp'", specifier = ">=2.1" },
+    { name = "lxt", specifier = ">=2.1" },
     { name = "matplotlib" },
     { name = "numpy", specifier = ">=1.26.4" },
     { name = "pandas", specifier = ">=2.2.0" },
@@ -2386,11 +2383,10 @@ requires-dist = [
     { name = "spacy", specifier = ">=3.8.4" },
     { name = "torch", specifier = ">=2.6.0", index = "https://download.pytorch.org/whl/cu126" },
     { name = "tqdm", specifier = ">=4.67.0" },
-    { name = "transformers", specifier = ">=4.49.0" },
-    { name = "transformers", marker = "extra == 'lrp'", specifier = "<5" },
+    { name = "transformers", specifier = ">=4.49.0,<5" },
     { name = "umap-learn", marker = "extra == 'clustering'", specifier = ">=0.5.5" },
 ]
-provides-extras = ["clustering", "lrp"]
+provides-extras = ["clustering"]
 
 [[package]]
 name = "preshed"

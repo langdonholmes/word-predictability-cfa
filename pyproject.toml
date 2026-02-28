@@ -6,7 +6,7 @@ requires-python = ">=3.11"
 dependencies = [
     # Core ML/NLP
     "torch>=2.6.0",
-    "transformers>=4.49.0",
+    "transformers>=4.49.0,<5",
     "spacy>=3.8.4",
     "lexicalrichness>=0.5.1",
     # Data processing
@@ -25,16 +25,13 @@ dependencies = [
     "matplotlib",
     # Progress bars
     "tqdm>=4.67.0",
+    "lxt>=2.1",
 ]
 
 [project.optional-dependencies]
 clustering = [
     "umap-learn>=0.5.5",
     "hdbscan>=0.8.33",
-]
-lrp = [
-    "lxt>=2.1",
-    "transformers<5",
 ]
 
 [tool.uv]
