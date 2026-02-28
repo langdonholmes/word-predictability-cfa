@@ -4,17 +4,24 @@ Computes per-context-token attribution scores for high-surprisal tokens in
 ELLIPSE learner essays, answering: "which context tokens made the model
 surprised at this position?"
 
-Uses captum's LayerIntegratedGradients on ModernBERT's embedding layer with
-a [PAD] baseline. Attributions are aggregated into POS × distance profiles
-by proficiency tertile.
+Supports three baseline modes (--baseline flag):
+  pad       — [PAD] token baseline via LayerIntegratedGradients (default)
+  gaussian  — N(μ_emb, Σ_emb) baselines via IntegratedGradients on embeddings
+  vocab     — Random vocabulary embeddings via IntegratedGradients on embeddings
+
+The gaussian and vocab modes implement "Expected Gradients" (Erion et al.,
+2021): IG is computed against multiple random baselines drawn from a
+distribution matched to the embedding space, then averaged. This keeps
+interpolation paths on-manifold and improves convergence over the PAD
+baseline.
 
 Subcommands:
-    compute  — Sample tokens and compute IG attributions (~7 min on GPU)
+    compute  — Sample tokens and compute IG attributions
     show     — Inspect a single token's attribution map
     profile  — Aggregate attribution profiles by proficiency
 
 Example workflow:
-    python ig_pilot.py compute
+    python ig_pilot.py compute --baseline gaussian --n-baselines 10
     python ig_pilot.py show 0
     python ig_pilot.py show 42 --top-n 20
     python ig_pilot.py profile
@@ -128,7 +135,7 @@ def cmd_compute(args):
     import spacy
     import torch
     from transformers import AutoModelForMaskedLM, AutoTokenizer, AutoConfig
-    from captum.attr import LayerIntegratedGradients
+    from captum.attr import IntegratedGradients, LayerIntegratedGradients
     from features.predictability import get_centered_window
 
     # Load metadata and sample
@@ -173,14 +180,42 @@ def cmd_compute(args):
     # Embedding layer for IG
     embed_layer = model.model.embeddings.tok_embeddings
 
-    # Forward function: returns surprisal at the masked position.
-    # mask_pos and target_id are passed via additional_forward_args.
-    def forward_fn(input_ids, attention_mask, mask_pos, target_id):
-        outputs = model(input_ids=input_ids, attention_mask=attention_mask)
-        log_probs = torch.log_softmax(outputs.logits[:, mask_pos, :], dim=-1)
-        return -log_probs[:, target_id]
+    # Baseline-specific setup
+    if args.baseline == "pad":
+        def forward_fn(input_ids, attention_mask, mask_pos, target_id):
+            outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+            log_probs = torch.log_softmax(outputs.logits[:, mask_pos, :], dim=-1)
+            return -log_probs[:, target_id]
 
-    lig = LayerIntegratedGradients(forward_fn, embed_layer)
+        lig = LayerIntegratedGradients(forward_fn, embed_layer)
+    else:
+        # Embedding-space forward function for gaussian/vocab baselines
+        def forward_fn_embeds(inputs_embeds, attention_mask, mask_pos, target_id):
+            outputs = model(inputs_embeds=inputs_embeds, attention_mask=attention_mask)
+            log_probs = torch.log_softmax(outputs.logits[:, mask_pos, :], dim=-1)
+            return -log_probs[:, target_id]
+
+        ig = IntegratedGradients(forward_fn_embeds)
+
+        W = embed_layer.weight.detach().to(args.device)  # (V, 768)
+
+        if args.baseline == "gaussian":
+            mu = W.mean(dim=0)                            # (768,)
+            Sigma = torch.cov(W.T)                        # (768, 768)
+            Sigma += 1e-6 * torch.eye(Sigma.shape[0], device=Sigma.device)
+            L = torch.linalg.cholesky(Sigma)              # (768, 768)
+            print(f"Gaussian baseline: μ norm={mu.norm():.1f}, "
+                  f"Σ trace={Sigma.diag().sum():.1f}")
+
+            def sample_baseline(seq_len):
+                z = torch.randn(seq_len, W.shape[1], device=W.device)
+                return mu + z @ L.T
+        else:  # vocab
+            print(f"Vocab baseline: sampling from {W.shape[0]} embeddings")
+
+            def sample_baseline(seq_len):
+                idx = torch.randint(0, W.shape[0], (seq_len,), device=W.device)
+                return W[idx]
 
     # Cache: essay_id -> (doc, token_map, trf_tok_ids)
     essay_cache = {}
@@ -194,6 +229,12 @@ def cmd_compute(args):
         return essay_cache[essay_id]
 
     # IG attribution loop
+    if args.baseline == "pad":
+        print(f"Baseline: pad (n_steps={args.n_steps})")
+    else:
+        print(f"Baseline: {args.baseline} "
+              f"(k={args.n_baselines}, steps={args.steps_per_baseline})")
+
     attr_rows = []
     meta_rows = []
     n_skipped = 0
@@ -243,50 +284,111 @@ def cmd_compute(args):
         first_mask_pos = tok_start_w + 1
         actual_first_id = int(trf_tok_ids[subword_start])
 
-        # PAD baseline: [CLS] + [PAD]... + [MASK]... + [PAD]... + [SEP]
-        baseline_ids = np.full_like(full_ids, pad_id)
-        baseline_ids[0] = cls_id
-        baseline_ids[-1] = sep_id
-        mask_positions = np.arange(tok_start_w, tok_end_w) + 1  # +1 for CLS
-        baseline_ids[mask_positions] = mask_id
+        # Mask positions in full sequence (+1 for CLS)
+        mask_positions = np.arange(tok_start_w, tok_end_w) + 1
 
-        # Tensors
+        # Shared tensors
         input_t = torch.from_numpy(
             full_ids.astype(np.int64)
         ).unsqueeze(0).to(args.device)
-        baseline_t = torch.from_numpy(
-            baseline_ids.astype(np.int64)
-        ).unsqueeze(0).to(args.device)
         attn_mask = torch.ones_like(input_t)
 
-        # Compute IG attributions
-        attr_result = lig.attribute(
-            inputs=input_t,
-            baselines=baseline_t,
-            additional_forward_args=(attn_mask, first_mask_pos, actual_first_id),
-            n_steps=args.n_steps,
-            return_convergence_delta=True,
-        )
+        if args.baseline == "pad":
+            # PAD baseline: [CLS] + [PAD]... + [MASK]... + [PAD]... + [SEP]
+            baseline_ids = np.full_like(full_ids, pad_id)
+            baseline_ids[0] = cls_id
+            baseline_ids[-1] = sep_id
+            baseline_ids[mask_positions] = mask_id
 
-        if isinstance(attr_result, tuple):
-            attr_tensor, convergence_delta = attr_result
-            conv_delta = convergence_delta.item()
+            baseline_t = torch.from_numpy(
+                baseline_ids.astype(np.int64)
+            ).unsqueeze(0).to(args.device)
+
+            attr_result = lig.attribute(
+                inputs=input_t,
+                baselines=baseline_t,
+                additional_forward_args=(attn_mask, first_mask_pos, actual_first_id),
+                n_steps=args.n_steps,
+                return_convergence_delta=True,
+            )
+
+            if isinstance(attr_result, tuple):
+                attr_tensor, convergence_delta = attr_result
+                conv_delta = convergence_delta.item()
+            else:
+                attr_tensor = attr_result
+                conv_delta = float("nan")
+
+            position_attrs = attr_tensor.sum(dim=-1).squeeze(0).cpu().numpy()
+
+            with torch.no_grad():
+                baseline_out = model(
+                    input_ids=baseline_t, attention_mask=attn_mask
+                )
+                baseline_lp = torch.log_softmax(
+                    baseline_out.logits[0, first_mask_pos], dim=-1
+                )
+                surprisal_baseline = -baseline_lp[actual_first_id].item()
+
         else:
-            attr_tensor = attr_result
-            conv_delta = float("nan")
+            # Embedding-space baselines (gaussian / vocab)
+            actual_embeds = embed_layer(input_t).detach()  # (1, seq_len, 768)
 
-        # Sum across embedding dims: (1, seq_len, 768) -> (seq_len,)
-        position_attrs = attr_tensor.sum(dim=-1).squeeze(0).cpu().numpy()
+            # Special positions get their real embeddings in the baseline
+            special_mask = torch.zeros(
+                len(full_ids), dtype=torch.bool, device=args.device
+            )
+            special_mask[0] = True          # CLS
+            special_mask[-1] = True         # SEP
+            for mp in mask_positions:
+                special_mask[mp] = True
 
-        # Baseline surprisal
-        with torch.no_grad():
-            baseline_out = model(
-                input_ids=baseline_t, attention_mask=attn_mask
+            # Average over multiple random baselines
+            accum = torch.zeros_like(actual_embeds)
+            conv_deltas = []
+            baseline_surprisals = []
+
+            for _ in range(args.n_baselines):
+                bl_embeds = sample_baseline(len(full_ids))    # (seq_len, 768)
+                bl_embeds[special_mask] = actual_embeds[0, special_mask]
+                bl_embeds = bl_embeds.unsqueeze(0)            # (1, seq_len, 768)
+
+                attr_result = ig.attribute(
+                    inputs=actual_embeds,
+                    baselines=bl_embeds,
+                    additional_forward_args=(
+                        attn_mask, first_mask_pos, actual_first_id
+                    ),
+                    n_steps=args.steps_per_baseline,
+                    return_convergence_delta=True,
+                )
+
+                if isinstance(attr_result, tuple):
+                    attr_i, cd_i = attr_result
+                    conv_deltas.append(cd_i.item())
+                else:
+                    attr_i = attr_result
+
+                accum += attr_i
+
+                with torch.no_grad():
+                    bl_out = model(
+                        inputs_embeds=bl_embeds, attention_mask=attn_mask
+                    )
+                    bl_lp = torch.log_softmax(
+                        bl_out.logits[0, first_mask_pos], dim=-1
+                    )
+                    baseline_surprisals.append(
+                        -bl_lp[actual_first_id].item()
+                    )
+
+            attr_tensor = accum / args.n_baselines
+            conv_delta = (
+                float(np.mean(conv_deltas)) if conv_deltas else float("nan")
             )
-            baseline_lp = torch.log_softmax(
-                baseline_out.logits[0, first_mask_pos], dim=-1
-            )
-            surprisal_baseline = -baseline_lp[actual_first_id].item()
+            surprisal_baseline = float(np.mean(baseline_surprisals))
+
+            position_attrs = attr_tensor.sum(dim=-1).squeeze(0).cpu().numpy()
 
         # Map subword attributions back to spaCy word tokens
         context_records = []
@@ -376,8 +478,8 @@ def cmd_compute(args):
     print(f"Saved {len(meta_df)} meta rows → {OUTPUT_DIR / 'ig_pilot_meta.parquet'}")
 
     params = {
+        "baseline_type": args.baseline,
         "n_per_tertile": args.n_per_tertile,
-        "n_steps": args.n_steps,
         "window_size": args.window_size,
         "seed": args.seed,
         "device": args.device,
@@ -388,6 +490,11 @@ def cmd_compute(args):
         "elapsed_seconds": round(elapsed_total, 1),
         "seconds_per_token": round(elapsed_total / max(1, len(meta_rows)), 3),
     }
+    if args.baseline == "pad":
+        params["n_steps"] = args.n_steps
+    else:
+        params["n_baselines"] = args.n_baselines
+        params["steps_per_baseline"] = args.steps_per_baseline
     with open(OUTPUT_DIR / "ig_pilot_params.json", "w") as f:
         json.dump(params, f, indent=2)
     print(f"Saved params → {OUTPUT_DIR / 'ig_pilot_params.json'}")
@@ -624,12 +731,25 @@ def build_parser():
         "compute", help="Sample tokens and compute IG attributions"
     )
     p_compute.add_argument(
+        "--baseline", choices=["pad", "gaussian", "vocab"], default="pad",
+        help="Baseline type: pad (PAD token), gaussian (N(μ,Σ) of embeddings), "
+             "vocab (random vocabulary embeddings) (default: pad)"
+    )
+    p_compute.add_argument(
+        "--n-baselines", type=int, default=20,
+        help="Number of random baselines to average (gaussian/vocab, default: 20)"
+    )
+    p_compute.add_argument(
+        "--steps-per-baseline", type=int, default=50,
+        help="IG steps per baseline (gaussian/vocab, default: 50)"
+    )
+    p_compute.add_argument(
         "--n-per-tertile", type=int, default=334,
         help="Tokens to sample per proficiency tertile (default: 334)"
     )
     p_compute.add_argument(
         "--n-steps", type=int, default=100,
-        help="IG interpolation steps (default: 100)"
+        help="IG interpolation steps for PAD baseline (default: 100)"
     )
     p_compute.add_argument(
         "--window-size", type=int, default=64,
