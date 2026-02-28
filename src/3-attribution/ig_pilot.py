@@ -4,8 +4,9 @@ Computes per-context-token attribution scores for high-surprisal tokens in
 ELLIPSE learner essays, answering: "which context tokens made the model
 surprised at this position?"
 
-Supports three baseline modes (--baseline flag):
+Supports four baseline modes (--baseline flag):
   pad       — [PAD] token baseline via LayerIntegratedGradients (default)
+  mask      — [MASK] token baseline via LayerIntegratedGradients
   gaussian  — N(μ_emb, Σ_emb) baselines via IntegratedGradients on embeddings
   vocab     — Random vocabulary embeddings via IntegratedGradients on embeddings
 
@@ -139,8 +140,9 @@ def cmd_compute(args):
     from features.predictability import get_centered_window
 
     # Load metadata and sample
-    print("Loading metadata...")
-    meta = pd.read_parquet(METADATA_PATH)
+    metadata_path = Path(args.metadata) if args.metadata else METADATA_PATH
+    print(f"Loading metadata from {metadata_path}...")
+    meta = pd.read_parquet(metadata_path)
 
     rng = np.random.default_rng(args.seed)
     samples = []
@@ -181,7 +183,9 @@ def cmd_compute(args):
     embed_layer = model.model.embeddings.tok_embeddings
 
     # Baseline-specific setup
-    if args.baseline == "pad":
+    if args.baseline in ("pad", "mask"):
+        fill_id = mask_id if args.baseline == "mask" else pad_id
+
         def forward_fn(input_ids, attention_mask, mask_pos, target_id):
             outputs = model(input_ids=input_ids, attention_mask=attention_mask)
             log_probs = torch.log_softmax(outputs.logits[:, mask_pos, :], dim=-1)
@@ -229,8 +233,8 @@ def cmd_compute(args):
         return essay_cache[essay_id]
 
     # IG attribution loop
-    if args.baseline == "pad":
-        print(f"Baseline: pad (n_steps={args.n_steps})")
+    if args.baseline in ("pad", "mask"):
+        print(f"Baseline: {args.baseline} (n_steps={args.n_steps})")
     else:
         print(f"Baseline: {args.baseline} "
               f"(k={args.n_baselines}, steps={args.steps_per_baseline})")
@@ -293,9 +297,9 @@ def cmd_compute(args):
         ).unsqueeze(0).to(args.device)
         attn_mask = torch.ones_like(input_t)
 
-        if args.baseline == "pad":
-            # PAD baseline: [CLS] + [PAD]... + [MASK]... + [PAD]... + [SEP]
-            baseline_ids = np.full_like(full_ids, pad_id)
+        if args.baseline in ("pad", "mask"):
+            # Token baseline: [CLS] + [fill]... + [MASK]... + [fill]... + [SEP]
+            baseline_ids = np.full_like(full_ids, fill_id)
             baseline_ids[0] = cls_id
             baseline_ids[-1] = sep_id
             baseline_ids[mask_positions] = mask_id
@@ -490,7 +494,7 @@ def cmd_compute(args):
         "elapsed_seconds": round(elapsed_total, 1),
         "seconds_per_token": round(elapsed_total / max(1, len(meta_rows)), 3),
     }
-    if args.baseline == "pad":
+    if args.baseline in ("pad", "mask"):
         params["n_steps"] = args.n_steps
     else:
         params["n_baselines"] = args.n_baselines
@@ -731,9 +735,10 @@ def build_parser():
         "compute", help="Sample tokens and compute IG attributions"
     )
     p_compute.add_argument(
-        "--baseline", choices=["pad", "gaussian", "vocab"], default="pad",
-        help="Baseline type: pad (PAD token), gaussian (N(μ,Σ) of embeddings), "
-             "vocab (random vocabulary embeddings) (default: pad)"
+        "--baseline", choices=["pad", "mask", "gaussian", "vocab"], default="pad",
+        help="Baseline type: pad (PAD token), mask (MASK token), "
+             "gaussian (N(μ,Σ) of embeddings), vocab (random vocabulary embeddings) "
+             "(default: pad)"
     )
     p_compute.add_argument(
         "--n-baselines", type=int, default=20,
@@ -759,6 +764,10 @@ def build_parser():
     p_compute.add_argument(
         "--device", type=str, default="cuda",
         help="Torch device (default: cuda)"
+    )
+    p_compute.add_argument(
+        "--metadata", type=str, default=None,
+        help="Custom metadata parquet path (default: pilot_metadata.parquet)"
     )
 
     # show
