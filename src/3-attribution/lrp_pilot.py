@@ -1,16 +1,17 @@
-"""AttnLRP attribution pilot for decomposing token-level surprisal.
+"""AttnLRP attribution pilot — decomposing masked-LM logits into per-token relevance.
 
-Uses LXT (LRP eXplains Transformers) with BERT to compute per-context-token
-relevance scores, answering: "which context tokens made the model surprised
-at this position?"
+Uses LXT (LRP eXplains Transformers) to decompose the model's logit for the
+actual token at a masked position into additive per-context-token relevance
+scores. Each score measures how much of the model's support for the target
+token is routed through a given context position.
+
+Supports two models:
+    bert-base-uncased   — LXT's built-in BERT support (conservation ~0.88)
+    ModernBERT-base     — custom patches in modernbert_lrp.py (conservation ~0.43,
+                          systematic scaling factor, relative rankings stable)
 
 AttnLRP (Arras et al., 2025) requires only 1 forward + 1 backward pass per
-token — roughly 30x faster than Integrated Gradients. The relevance scores
-approximately conserve the target value (surprisal).
-
-This pilot uses bert-base-uncased (not ModernBERT) because LXT has built-in
-AttnLRP support for BERT. The model differs from the rest of the pipeline,
-but for a pilot exploring method viability this is acceptable.
+token, giving ~3x speedup over Integrated Gradients.
 
 Subcommands:
     compute  — Sample tokens and compute AttnLRP attributions
@@ -18,7 +19,8 @@ Subcommands:
     profile  — Aggregate attribution profiles by proficiency
 
 Example workflow:
-    python lrp_pilot.py compute --n-per-tertile 5
+    python lrp_pilot.py compute --model modernbert
+    python lrp_pilot.py compute --model bert --n-per-tertile 5
     python lrp_pilot.py show 0
     python lrp_pilot.py profile
 
@@ -46,9 +48,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from util.paths import DATA_DIR, FIG_DIR
 
 METADATA_PATH = DATA_DIR / "pilot_metadata.parquet"
+FULL_TOKEN_PATH = DATA_DIR / "ELLIPSE_token_predictability.parquet"
 ELLIPSE_PATH = DATA_DIR / "ELLIPSE_Final_github.csv"
 OUTPUT_DIR = DATA_DIR / "lrp_pilot"
-MODEL_NAME = "bert-base-uncased"
+
+MODELS = {
+    "bert": "bert-base-uncased",
+    "modernbert": "answerdotai/ModernBERT-base",
+}
 
 # POS coarsening: 8 categories
 POS_COARSE_MAP = {
@@ -127,17 +134,66 @@ def cmd_compute(args):
     """Sample tokens and compute AttnLRP attributions."""
     import spacy
     import torch
-    import transformers.models.bert.modeling_bert as modeling_bert
-    from lxt.efficient import monkey_patch
+    from transformers import AutoTokenizer, AutoConfig
     from features.predictability import get_centered_window
 
-    # Patch BERT module for AttnLRP before loading model
-    monkey_patch(modeling_bert, verbose=True)
+    model_key = args.model
+    model_name = MODELS[model_key]
+
+    # Patch the appropriate module for AttnLRP before loading model
+    if model_key == "bert":
+        import transformers.models.bert.modeling_bert as modeling_mod
+        from lxt.efficient import monkey_patch
+        monkey_patch(modeling_mod, verbose=True)
+        ModelClass = modeling_mod.BertForMaskedLM
+    else:
+        import transformers.models.modernbert.modeling_modernbert as modeling_mod
+        from modernbert_lrp import monkey_patch_modernbert
+        monkey_patch_modernbert(modeling_mod, verbose=True)
+        ModelClass = modeling_mod.ModernBertForMaskedLM
 
     # Load metadata and sample
-    metadata_path = Path(args.metadata) if args.metadata else METADATA_PATH
-    print(f"Loading metadata from {metadata_path}...")
-    meta = pd.read_parquet(metadata_path)
+    if args.all_surprisal:
+        # Sample across full surprisal spectrum from raw token-level data
+        print(f"Loading full token data from {FULL_TOKEN_PATH}...")
+        full_tokens = pd.read_parquet(FULL_TOKEN_PATH)
+        full_tokens = full_tokens.rename(columns={
+            "text_id_kaggle": "essay_id",
+            "text": "token_text",
+            "mean_loss": "surprisal",
+        })
+
+        # Join with essay scores to get proficiency tertiles
+        essays_df_for_tertile = pd.read_csv(ELLIPSE_PATH)
+        t_low, t_high = essays_df_for_tertile["Overall"].quantile([1/3, 2/3]).values
+        essays_df_for_tertile["prof_tertile"] = pd.cut(
+            essays_df_for_tertile["Overall"],
+            bins=[0, t_low, t_high, 6],
+            labels=["low", "mid", "high"],
+            include_lowest=True,
+        )
+        full_tokens = full_tokens.merge(
+            essays_df_for_tertile[["text_id_kaggle", "prof_tertile"]].rename(
+                columns={"text_id_kaggle": "essay_id"}
+            ),
+            on="essay_id",
+            how="inner",
+        )
+
+        # Exclude first/last token of each essay (degenerate context)
+        essay_lengths = full_tokens.groupby("essay_id")["spacy_idx"].transform("max")
+        full_tokens = full_tokens[
+            (full_tokens["spacy_idx"] > 0) & (full_tokens["spacy_idx"] < essay_lengths)
+        ]
+
+        print(f"  {len(full_tokens)} eligible tokens across full surprisal spectrum")
+        meta = full_tokens
+        all_surprisal_mode = True
+    else:
+        metadata_path = Path(args.metadata) if args.metadata else METADATA_PATH
+        print(f"Loading metadata from {metadata_path}...")
+        meta = pd.read_parquet(metadata_path)
+        all_surprisal_mode = False
 
     rng = np.random.default_rng(args.seed)
     samples = []
@@ -150,17 +206,18 @@ def cmd_compute(args):
     print(f"Sampled {len(sample_df)} tokens: "
           f"{sample_df['prof_tertile'].value_counts().to_dict()}")
 
-    # Load model (must use modeling_bert.BertForMaskedLM, not AutoModel,
-    # because monkey_patch patches the module's classes in-place)
-    print(f"Loading {MODEL_NAME}...")
-    model = modeling_bert.BertForMaskedLM.from_pretrained(MODEL_NAME)
+    # Load model from patched module (not AutoModel — patches are in-place)
+    print(f"Loading {model_name}...")
+    config = AutoConfig.from_pretrained(model_name)
+    if hasattr(config, "reference_compile"):
+        config.reference_compile = False
+    model = ModelClass.from_pretrained(model_name, config=config)
     model.to(args.device)
     model.eval()
     for p in model.parameters():
         p.requires_grad = False
 
-    tokenizer_mod = __import__("transformers", fromlist=["AutoTokenizer"])
-    tokenizer = tokenizer_mod.AutoTokenizer.from_pretrained(MODEL_NAME)
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
 
     # Load spaCy
     print("Loading spaCy...")
@@ -177,7 +234,10 @@ def cmd_compute(args):
     sep_id = tokenizer.sep_token_id
 
     # Embedding layer for LRP
-    embed_fn = model.bert.get_input_embeddings()
+    if model_key == "bert":
+        embed_fn = model.bert.get_input_embeddings()
+    else:
+        embed_fn = model.model.embeddings.tok_embeddings
 
     # Cache: essay_id -> (doc, token_map, trf_tok_ids)
     essay_cache = {}
@@ -258,8 +318,13 @@ def cmd_compute(args):
         logits = outputs.logits[0, first_mask_pos]
         log_probs = torch.log_softmax(logits, dim=-1)
 
-        # Record surprisal regardless of backward target
+        # Record surprisal from model output regardless of backward target
         surprisal_val = -log_probs[actual_first_id].item()
+
+        # Compute top-3 predictions from model output
+        top3_probs_t, top3_ids_t = torch.topk(log_probs.exp(), 3)
+        top3_predicted = [tokenizer.decode([tid]) for tid in top3_ids_t.tolist()]
+        top3_probs_val = top3_probs_t.tolist()
 
         if args.contrastive:
             # Contrastive: backward with mask where top_pred=1, others=-1/V
@@ -293,6 +358,21 @@ def cmd_compute(args):
         # Zero out gradients for next iteration
         input_embeds.grad = None
 
+        # Get POS tag and context from spaCy doc (works for both modes)
+        target_token_obj = doc[spacy_idx]
+        pos_tag = target_token_obj.pos_
+        # Build left/right context from doc
+        left_ctx = " ".join(t.text for t in doc[max(0, spacy_idx - 5):spacy_idx])
+        right_ctx = " ".join(t.text for t in doc[spacy_idx + 1:spacy_idx + 6])
+
+        # Use precomputed top3 from metadata if available, else from model
+        if "top3_predicted" in row.index and not all_surprisal_mode:
+            meta_top3_pred = row["top3_predicted"]
+            meta_top3_prob = row["top3_probs"]
+        else:
+            meta_top3_pred = np.array(top3_predicted)
+            meta_top3_prob = np.array(top3_probs_val)
+
         # Map subword relevances back to spaCy word tokens
         context_records = []
         for ctx_spacy_idx, (ctx_sub_start, ctx_sub_end) in token_map.items():
@@ -324,7 +404,7 @@ def cmd_compute(args):
                 "target_essay_id": essay_id,
                 "target_text": row["token_text"],
                 "target_surprisal": row["surprisal"],
-                "target_pos": row["pos_tag"],
+                "target_pos": pos_tag,
                 "target_prof_tertile": row["prof_tertile"],
                 "ctx_spacy_idx": ctx_spacy_idx,
                 "ctx_text": ctx_token.text,
@@ -346,14 +426,14 @@ def cmd_compute(args):
             "surprisal": row["surprisal"],
             "surprisal_bert": surprisal_val,
             "target_scalar": target_val,
-            "pos_tag": row["pos_tag"],
+            "pos_tag": pos_tag,
             "prof_tertile": row["prof_tertile"],
             "conservation_ratio": conservation,
             "n_context_tokens": len(context_records),
-            "left_context": row["left_context"],
-            "right_context": row["right_context"],
-            "top3_predicted": row["top3_predicted"],
-            "top3_probs": row["top3_probs"],
+            "left_context": left_ctx,
+            "right_context": right_ctx,
+            "top3_predicted": meta_top3_pred,
+            "top3_probs": meta_top3_prob,
         })
 
         if (i + 1) % 50 == 0 or i == 0:
@@ -391,8 +471,9 @@ def cmd_compute(args):
 
     params = {
         "method": "AttnLRP",
-        "model": MODEL_NAME,
+        "model": model_name,
         "mode": mode,
+        "all_surprisal": args.all_surprisal,
         "n_per_tertile": args.n_per_tertile,
         "window_size": args.window_size,
         "seed": args.seed,
@@ -639,8 +720,17 @@ def build_parser():
         "compute", help="Sample tokens and compute AttnLRP attributions"
     )
     p_compute.add_argument(
+        "--model", choices=["bert", "modernbert"], default="modernbert",
+        help="Model to use: bert (LXT built-in) or modernbert (custom patches) "
+             "(default: modernbert)"
+    )
+    p_compute.add_argument(
+        "--all-surprisal", action="store_true",
+        help="Sample from full surprisal spectrum (all tokens), not just high-surprisal"
+    )
+    p_compute.add_argument(
         "--contrastive", action="store_true",
-        help="Use contrastive target (top-pred vs others) instead of raw surprisal"
+        help="Use contrastive target (top-pred vs others) instead of raw logit"
     )
     p_compute.add_argument(
         "--n-per-tertile", type=int, default=334,
