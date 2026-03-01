@@ -1,7 +1,6 @@
 """Calculate linguistic features for ELLIPSE essays and merge with predictability."""
 
 import sys
-import shutil
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -22,33 +21,15 @@ def main():
     )
     print(f"Loaded {len(df)} essays")
 
-    # spaCy processing with DocBin checkpoint
+    # Load pre-built DocBins (created by ingest_essays.py)
     nlp = spacy.load("en_core_web_lg", disable=["ner"])
     docbin_dir = DATA_DIR / "ellipse_docbins"
 
-    # Delete existing docbins (data source changed)
-    if docbin_dir.exists():
-        print(f"Removing old docbins at {docbin_dir}...")
-        shutil.rmtree(docbin_dir)
-
     if not docbin_dir.exists() or not any(docbin_dir.glob("*.spacy")):
-        from util.process_docs import process_dataframe
-
-        print("Processing essays with spaCy (this may take a while)...")
-        process_dataframe(
-            df=df,
-            text_col="full_text",
-            metadata_col="text_id_kaggle",
-            output_dir=str(docbin_dir),
-            model="en_core_web_lg",
-            n_process=32,
-            batch_size=512,
+        raise FileNotFoundError(
+            f"DocBins not found at {docbin_dir}. Run ingest_essays.py --ellipse first."
         )
-        print("Done.")
-    else:
-        print(f"DocBin checkpoint already exists at {docbin_dir}, skipping processing.")
 
-    # Load docs
     print("Loading docs from DocBin files...")
     docs = []
     filenames = []
@@ -56,7 +37,8 @@ def main():
         doc_bin = DocBin().from_disk(file_path)
         for doc in doc_bin.get_docs(nlp.vocab):
             docs.append(doc)
-            filenames.append(doc.user_data.get("meta", None))
+            meta = doc.user_data.get("meta", None)
+            filenames.append(meta["text_id"] if isinstance(meta, dict) else meta)
 
     print(f"Loaded {len(docs)} documents")
     assert len(docs) == len(df), f"Expected {len(df)} docs, got {len(docs)}"
