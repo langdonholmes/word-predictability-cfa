@@ -76,10 +76,9 @@ src/
     2_collate_slim_pajama.py
     3_calculate_predictability.py
     4_calculate_metrics.py
-  ch1_network/              # Network psychometric analysis (R/Quarto)
-  ch2_predictability/       # (planned)
-  ch3_invariance/           # (planned)
-  ch4_xai/                  # (planned)
+  study_1_network/              # Network psychometric analysis (R/Quarto)
+  study_2_predictability/
+  study_3_vector_transformations/
 data/
   ELLIPSE_Final_github.csv  # Public ELLIPSE dataset (6,482 essays, 44 prompts)
   slim_pajama_docbins/      # Reference corpus DocBins
