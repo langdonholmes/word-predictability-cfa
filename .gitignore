@@ -24,3 +24,6 @@ src/__*
 # OS files
 .DS_Store
 Thumbs.db
+
+# Log Files
+*.log
