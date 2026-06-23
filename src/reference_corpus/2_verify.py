@@ -1,7 +1,7 @@
 """Verify sampled & preprocessed Dolma corpora: token counts, PII, duplicates.
 
 Usage:
-    python src/pipeline/2_verify_dolma.py --corpus a|b
+    python src/reference_corpus/2_verify.py --corpus a|b
 """
 
 import argparse

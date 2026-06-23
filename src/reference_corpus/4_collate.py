@@ -11,7 +11,7 @@ with polars' streaming engine, summing counts per key out-of-core and applying
 shards whose partials already exist are skipped.
 
 Usage:
-    python src/pipeline/4_collate_dolma.py --corpus a|b \
+    python src/reference_corpus/4_collate.py --corpus a|b \
         [--min-count 2] [--keep-partials]
 """
 
@@ -105,7 +105,7 @@ def collate_corpus(
     docbin_dir = DOLMA_DOCBINS_DIR / f"corpus_{corpus}"
     if not docbin_dir.exists() or not any(docbin_dir.glob("*.spacy")):
         raise FileNotFoundError(
-            f"No DocBins found at {docbin_dir}. Run 3_spacy_dolma.py first."
+            f"No DocBins found at {docbin_dir}. Run 3_parse.py first."
         )
 
     out_dir = DOLMA_FREQ_DIR / f"corpus_{corpus}"

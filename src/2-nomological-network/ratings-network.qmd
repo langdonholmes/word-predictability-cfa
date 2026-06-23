@@ -45,7 +45,7 @@ library(lavaan)
 #| label: load-data
 
 # Use readr::read_csv to handle quoted newlines in the Text column
-df_raw <- readr::read_csv("../../data/ellipse_raw_rater_scores_anon_all_essay_w_predictability.csv",
+df_raw <- readr::read_csv("../../data/ellipse/ellipse_raw_rater_scores_anon_all_essay_w_predictability.csv",
                           show_col_types = FALSE)
 
 cat("Raw data:", nrow(df_raw), "rows x", ncol(df_raw), "columns\n")

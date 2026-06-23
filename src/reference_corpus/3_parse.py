@@ -12,7 +12,7 @@ assignment is ``i % n_workers``, resuming is only valid with the same
 ``--n-workers`` as the original run; a mismatch is rejected.
 
 Usage:
-    python src/pipeline/3_spacy_dolma.py --corpus a|b \
+    python src/reference_corpus/3_parse.py --corpus a|b \
         [--n-workers 8] [--tokens-per-file 10000000]
 """
 

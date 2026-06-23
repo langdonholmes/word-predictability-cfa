@@ -10,24 +10,24 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pandas as pd
 
-from util.paths import DATA_DIR
+from util.paths import ELLIPSE_DIR, ELLIPSE_DOCBINS_DIR, TOEFL_DIR, TOEFL_DOCBINS_DIR
 from util.process_docs import process_dataframe
 
 
 def ingest_toefl11(force: bool = False):
     """Read TOEFL 11 essays from zip archive and save as DocBins."""
-    docbin_dir = DATA_DIR / "toefl11_docbins"
+    docbin_dir = TOEFL_DOCBINS_DIR
 
     if docbin_dir.exists() and any(docbin_dir.glob("*.spacy")) and not force:
         print(f"TOEFL 11 DocBins already exist at {docbin_dir}, skipping (use --force to regenerate)")
         return
 
     # Load index
-    index_df = pd.read_csv(DATA_DIR / "index-training-dev.csv")
+    index_df = pd.read_csv(TOEFL_DIR / "index-training-dev.csv")
     print(f"Loaded TOEFL 11 index: {len(index_df)} entries")
 
     # Map bare filenames to zip paths
-    zip_path = DATA_DIR / "toefl_11_txt.zip"
+    zip_path = TOEFL_DIR / "toefl_11_txt.zip"
     with zipfile.ZipFile(zip_path) as z:
         file_paths = {}
         for name in z.namelist():
@@ -90,13 +90,13 @@ def ingest_toefl11(force: bool = False):
 
 def ingest_ellipse(force: bool = False):
     """Read ELLIPSE essays from CSV and save as DocBins."""
-    docbin_dir = DATA_DIR / "ellipse_docbins"
+    docbin_dir = ELLIPSE_DOCBINS_DIR
 
     if docbin_dir.exists() and any(docbin_dir.glob("*.spacy")) and not force:
         print(f"ELLIPSE DocBins already exist at {docbin_dir}, skipping (use --force to regenerate)")
         return
 
-    df = pd.read_csv(DATA_DIR / "ELLIPSE_Final_github.csv")
+    df = pd.read_csv(ELLIPSE_DIR / "ELLIPSE_Final_github.csv")
     print(f"Loaded ELLIPSE: {len(df)} essays")
 
     df = df.dropna(subset=["full_text"])

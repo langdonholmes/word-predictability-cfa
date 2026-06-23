@@ -11,7 +11,7 @@ from transformers import AutoTokenizer, AutoModelForMaskedLM
 from tqdm.auto import tqdm
 
 from features.predictability import Predictor
-from util.paths import DATA_DIR
+from util.paths import ELLIPSE_DIR
 
 
 def main():
@@ -25,7 +25,7 @@ def main():
         torch.set_float32_matmul_precision("high")
 
     # Load the dataset
-    df = pd.read_csv(DATA_DIR / "ELLIPSE_Final_github.csv")
+    df = pd.read_csv(ELLIPSE_DIR / "ELLIPSE_Final_github.csv")
     print(f"Loaded {len(df)} essays")
 
     # Load spaCy
@@ -104,13 +104,13 @@ def main():
     print("Summary statistics for predictability metrics:\n")
     print(df[["mean_loss", "mean_prob", "mean_entropy", "var_loss"]].describe())
 
-    output_path = DATA_DIR / "ELLIPSE_Final_github_w_predictability.csv"
+    output_path = ELLIPSE_DIR / "ELLIPSE_Final_github_w_predictability.csv"
     df.to_csv(output_path, index=False)
     print(f"\nResults saved to: {output_path}")
 
     # Save per-token data as parquet
     token_df = pd.DataFrame(token_records)
-    token_parquet_path = DATA_DIR / "ELLIPSE_token_predictability.parquet"
+    token_parquet_path = ELLIPSE_DIR / "ELLIPSE_token_predictability.parquet"
     token_df.to_parquet(token_parquet_path, index=False)
     print(f"Saved {len(token_df)} token records to: {token_parquet_path}")
 

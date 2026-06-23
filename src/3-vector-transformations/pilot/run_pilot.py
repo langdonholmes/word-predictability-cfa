@@ -21,9 +21,9 @@ import spacy
 from transformers import AutoTokenizer, AutoModelForMaskedLM
 from tqdm.auto import tqdm
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from features.predictability import Predictor, get_centered_window
-from util.paths import DATA_DIR
+from util.paths import ELLIPSE_DIR, PILOT_DIR
 
 # ── Config ────────────────────────────────────────────────────────────
 SAMPLE_PER_TERTILE = 333
@@ -222,7 +222,7 @@ def main():
     print("spaCy loaded")
 
     # ── Load and sample essays ────────────────────────────────────────
-    essays = pd.read_csv(DATA_DIR / "ELLIPSE_Final_github.csv")
+    essays = pd.read_csv(ELLIPSE_DIR / "ELLIPSE_Final_github.csv")
     print(f"\nLoaded {len(essays)} essays")
 
     essays["prof_tertile"] = pd.qcut(
@@ -338,8 +338,8 @@ def main():
     ])
 
     print(f"\nDelta matrix shape: {deltas.shape}")
-    np.save(DATA_DIR / "pilot_deltas.npy", deltas)
-    metadata.to_parquet(DATA_DIR / "pilot_metadata.parquet", index=False)
+    np.save(PILOT_DIR / "pilot_deltas.npy", deltas)
+    metadata.to_parquet(PILOT_DIR / "pilot_metadata.parquet", index=False)
     print(f"Saved pilot_deltas.npy and pilot_metadata.parquet")
 
     elapsed = time.time() - t_start

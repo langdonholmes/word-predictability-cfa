@@ -38,7 +38,7 @@ library(lavaan)
 
 ```{r}
 #| label: load-data
-df_raw <- read.csv("../../data/ellipse_metrics.csv")
+df_raw <- read.csv("../../data/ellipse/ellipse_metrics.csv")
 
 cat("Raw data:", nrow(df_raw), "rows x", ncol(df_raw), "columns\n")
 ```

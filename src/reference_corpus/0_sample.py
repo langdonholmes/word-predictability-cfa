@@ -1,7 +1,7 @@
 """Sample register-contrastive corpora from Dolma v1.7.
 
 Usage:
-    python src/pipeline/0_sample_dolma.py --corpus a|b [--source NAME] [--seed N] [--resume]
+    python src/reference_corpus/0_sample.py --corpus a|b [--source NAME] [--seed N] [--resume]
 """
 
 import argparse

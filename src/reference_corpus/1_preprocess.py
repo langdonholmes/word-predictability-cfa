@@ -1,7 +1,7 @@
 """Preprocess sampled Dolma JSONL files: PII replacement, normalization, filtering.
 
 Usage:
-    python src/pipeline/1_preprocess_dolma.py --corpus a|b
+    python src/reference_corpus/1_preprocess.py --corpus a|b
 """
 
 import argparse
