@@ -107,6 +107,40 @@ def count_ngrams_and_depgrams(
     return ngram_counter, dep_counter
 
 
+def merge_partial_parquets(
+    glob_pattern: str,
+    key_cols: list[str],
+    out_path,
+    min_count: int = 2,
+) -> int:
+    """Merge per-shard partial parquets into one final table, out-of-core.
+
+    Each partial holds (key_cols..., count) for one shard with no
+    ``min_count`` filtering. This sums counts for identical keys across all
+    partials using polars' streaming engine (``sink_parquet``), applying the
+    ``min_count`` threshold only after the global sum so nothing seen >=
+    ``min_count`` times overall is dropped. Memory stays bounded regardless of
+    how many unique keys exist.
+
+    Returns the number of rows written to ``out_path``.
+    """
+    lf = (
+        pl.scan_parquet(glob_pattern)
+        .group_by(key_cols)
+        .agg(pl.col("count").sum().alias("count"))
+        .filter(pl.col("count") >= min_count)
+    )
+    # Streaming sink: spills to disk rather than materializing all groups.
+    lf.sink_parquet(out_path, compression="zstd")
+
+    n_rows = pl.scan_parquet(out_path).select(pl.len()).collect().item()
+    logger.info(
+        "Merged %s → %s rows (min_count=%d)",
+        glob_pattern, f"{n_rows:,}", min_count,
+    )
+    return n_rows
+
+
 def counter_to_ngram_parquet(
     counter: Counter, n: int, min_count: int = 2
 ) -> pl.DataFrame:

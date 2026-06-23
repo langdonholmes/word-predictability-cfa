@@ -94,17 +94,25 @@ def process_dataframe(
         print(f"\nSaved final DocBin {current_docbin_idx} to {output_path}")
 
 
+def load_docbin(file_path):
+    """Yield all docs from a single DocBin file.
+
+    Useful for memory-bounded, per-file processing (e.g. sharded counting),
+    where loading the entire corpus at once would not fit in RAM.
+    """
+    nlp = spacy.blank("en")  # Light-weight model just for loading
+    doc_bin = DocBin().from_disk(file_path)
+    yield from doc_bin.get_docs(nlp.vocab)
+
+
 def load_all_docbins(directory):
     """
     Generator function to load and yield all docs from multiple DocBin files.
     """
     directory = Path(directory)
-    nlp = spacy.blank("en")  # Light-weight model just for loading
 
     for file_path in sorted(directory.glob("*.spacy")):
-        doc_bin = DocBin().from_disk(file_path)
-        for doc in doc_bin.get_docs(nlp.vocab):
-            yield doc
+        yield from load_docbin(file_path)
 
 
 if __name__ == "__main__":
