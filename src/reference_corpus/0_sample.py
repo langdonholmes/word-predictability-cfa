@@ -42,8 +42,8 @@ def main():
         if not specs:
             parser.error(f"Unknown source {args.source!r} for corpus {args.corpus}")
 
-    log_dir = DOLMA_DIR / "logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
+    report_dir = DOLMA_DIR / "reports"
+    report_dir.mkdir(parents=True, exist_ok=True)
 
     results = []
     for spec in specs:
@@ -68,7 +68,7 @@ def main():
         "resumed": args.resume,
         "sources": results,
     }
-    log_path = log_dir / "sampling_log.json"
+    log_path = report_dir / "sampling_log.json"
     # Append to existing log if present
     if log_path.exists():
         existing = json.loads(log_path.read_text())

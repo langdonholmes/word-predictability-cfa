@@ -44,10 +44,9 @@ def load_reference_grams(corpus: str):
     ngram_df = pd.concat(ngram_frames, ignore_index=True)
     dep_df = pd.concat(dep_frames, ignore_index=True)
 
-    # MiCalculator expects (head_lemma, dependent_lemma, relation, count).
-    # The Dolma collate emits (head_lemma, head_tag, relation, dep_lemma,
-    # dep_tag, count); collapse the POS-tag granularity and rename to match.
-    dep_df = dep_df.rename(columns={"dep_lemma": "dependent_lemma"})
+    # MiCalculator keys on (head_lemma, dependent_lemma, relation, count).
+    # The Dolma collate also carries POS tags (head_tag, dependent_tag);
+    # collapse that granularity by summing counts over the lemma+relation key.
     dep_df = dep_df.groupby(
         ["head_lemma", "dependent_lemma", "relation"], as_index=False
     )["count"].sum()

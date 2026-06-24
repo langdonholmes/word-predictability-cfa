@@ -166,9 +166,9 @@ def verify_corpus(corpus: str, seed: int = DEFAULT_SEED) -> dict:
         "sample_docs": sample_records,
     }
 
-    log_dir = DOLMA_DIR / "logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
-    report_path = log_dir / "verification_report.json"
+    report_dir = DOLMA_DIR / "reports"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    report_path = report_dir / "verification_report.json"
     report_path.write_text(json.dumps(report, indent=2))
     logger.info("\nVerification report written to %s", report_path)
 

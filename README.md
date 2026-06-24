@@ -115,7 +115,7 @@ data/
     preprocessed/           # Cleaned jsonl.gz + summaries
     docbins/                # spaCy DocBins (corpus_a, corpus_b)
     frequency_tables/       # Collated n-gram / depgram parquet (corpus_a, corpus_b)
-    logs/                   # Sampling and verification reports
+    reports/                # Sampling and verification reports (JSON)
   pilot/                    # Archived pilot artifacts (SlimPajama lists, delta vectors)
 ```
 
